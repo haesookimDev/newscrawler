@@ -1,0 +1,84 @@
+db:
+  driver: postgres
+  dsn: postgres://user:pass@localhost:5432/newscrawler?sslmode=disable
+  max_open_conns: 10
+  max_idle_conns: 5
+  conn_max_lifetime: 15m
+  migrations_path: migrations
+
+vector_db:
+  provider: pinecone
+  endpoint: https://controller.example.pinecone.io
+  api_key: ""
+  index: news-index
+  namespace: korean-news
+  dimension: 768
+  embedding_model: text-embedding-3-small
+  upsert_batch_size: 64
+
+worker:
+  concurrency: 32
+  queue_size: 2048
+  max_retries: 3
+  retry_backoff: 500ms
+
+crawl:
+  seeds:
+    - url: https://news.example.com/
+      max_depth: 3
+  max_depth: 3
+  max_pages: 1000
+  user_agent: newscrawler-bot/1.0
+  headers:
+    Accept-Language: ko-KR,ko;q=0.9,en-US;q=0.8
+  proxy_url: ""
+  allowed_domains:
+    - news.example.com
+  excluded_domains:
+    - ads.example.com
+  per_domain_delay: 250ms
+  rate_limit_per_domain:
+    requests: 0
+    window: 0s
+  request_timeout: 10s
+  discovery:
+    follow_external: false
+    max_links_per_page: 200
+    include_patterns: []
+    exclude_patterns:
+      - "\\?reply="
+    min_content_length: 500
+  footprint:
+    enabled: true
+    ttl: 24h
+    max_entries: 100000
+
+preprocess:
+  remove_ads: true
+  remove_scripts: true
+  remove_styles: false
+  trim_whitespace: true
+  ad_selectors:
+    - "[class*='ad']"
+    - "[id*='ad']"
+  extra_drop_classes:
+    - sponsored
+
+robots:
+  respect: true
+  overrides:
+    - news.example.com
+  user_agent: newscrawler-bot/1.0
+  cache_ttl: 6h
+
+rendering:
+  enabled: true
+  engine: chromedp
+  timeout: 15s
+  wait_for_selector: ""
+  concurrent_sessions: 2
+  disable_headless: false
+
+logging:
+  level: info
+  structured: true
