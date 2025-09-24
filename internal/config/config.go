@@ -32,6 +32,7 @@ type SQLConfig struct {
 	MaxIdleConns    int      `yaml:"max_idle_conns"`
 	ConnMaxLifetime Duration `yaml:"conn_max_lifetime"`
 	MigrationsPath  string   `yaml:"migrations_path"`
+	CreateIfMissing bool     `yaml:"create_if_missing"`
 }
 
 // VectorDBConfig describes a vector database used to store embeddings or semantic features.

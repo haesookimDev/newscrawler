@@ -5,9 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 	"time"
 
-	_ "github.com/lib/pq"
+	pq "github.com/lib/pq"
 
 	"newscrawler/internal/config"
 	"newscrawler/pkg/types"
@@ -99,6 +101,26 @@ func NewSQLWriter(cfg config.SQLConfig) (*SQLWriter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sql connection: %w", err)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := db.PingContext(ctx); err != nil {
+		if cfg.CreateIfMissing && shouldAttemptCreateDatabase(cfg.Driver, err) {
+			_ = db.Close()
+			if err := createDatabase(ctx, cfg); err != nil {
+				return nil, err
+			}
+			db, err = sql.Open(cfg.Driver, cfg.DSN)
+			if err != nil {
+				return nil, fmt.Errorf("open sql connection: %w", err)
+			}
+			if err := db.PingContext(ctx); err != nil {
+				return nil, fmt.Errorf("ping sql connection: %w", err)
+			}
+		} else {
+			return nil, fmt.Errorf("ping sql connection: %w", err)
+		}
+	}
 	if cfg.MaxOpenConns > 0 {
 		db.SetMaxOpenConns(cfg.MaxOpenConns)
 	}
@@ -155,5 +177,49 @@ type NoopVectorStore struct{}
 
 // UpsertEmbedding satisfies the VectorStore interface without persisting data.
 func (NoopVectorStore) UpsertEmbedding(ctx context.Context, doc Document) error {
+	return nil
+}
+
+func shouldAttemptCreateDatabase(driver string, err error) bool {
+	if !strings.EqualFold(driver, "postgres") {
+		return false
+	}
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) {
+		return pqErr.Code == "3D000"
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "does not exist")
+}
+
+func createDatabase(ctx context.Context, cfg config.SQLConfig) error {
+	parsed, err := url.Parse(cfg.DSN)
+	if err != nil {
+		return fmt.Errorf("parse dsn: %w", err)
+	}
+	dbName := strings.TrimPrefix(parsed.Path, "/")
+	if dbName == "" {
+		return errors.New("dsn missing database name")
+	}
+	if strings.EqualFold(dbName, "postgres") {
+		return fmt.Errorf("target database %q cannot be auto-created", dbName)
+	}
+	parsed.Path = "/postgres"
+	adminDSN := parsed.String()
+	adminDB, err := sql.Open(cfg.Driver, adminDSN)
+	if err != nil {
+		return fmt.Errorf("connect admin database: %w", err)
+	}
+	defer adminDB.Close()
+	if err := adminDB.PingContext(ctx); err != nil {
+		return fmt.Errorf("ping admin database: %w", err)
+	}
+	stmt := fmt.Sprintf("CREATE DATABASE %s", pq.QuoteIdentifier(dbName))
+	if _, err := adminDB.ExecContext(ctx, stmt); err != nil {
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && pqErr.Code == "42P04" {
+			return nil
+		}
+		return fmt.Errorf("create database %q: %w", dbName, err)
+	}
 	return nil
 }

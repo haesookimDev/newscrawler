@@ -191,6 +191,13 @@ func (e *Engine) Run(ctx context.Context) error {
 	e.pool = pool
 	defer pool.Close()
 	defer e.Close()
+	e.logger.Info("crawler engine started",
+		"concurrency", e.cfg.Worker.Concurrency,
+		"queue", e.cfg.Worker.QueueSize,
+		"max_depth", e.cfg.Crawl.MaxDepth,
+		"max_pages", e.maxPages,
+	)
+	defer e.logger.Info("crawler engine stopped")
 
 	seeds, err := e.buildSeedRequests()
 	if err != nil {
@@ -198,6 +205,7 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 
 	for _, req := range seeds {
+		e.logger.Info("enqueue seed", "url", req.URL.String(), "max_depth", req.MaxDepth)
 		e.enqueue(ctx, req)
 	}
 
@@ -272,25 +280,27 @@ func (e *Engine) handleRequest(ctx context.Context, req types.CrawlRequest) {
 	}
 
 	defer e.footprint.MarkExplored(req.URL, req.Depth)
+	logger := e.logger.With("url", req.URL.String(), "depth", req.Depth)
+	logger.Debug("processing request")
 
 	if !e.robots.Allowed(ctx, req.URL) {
-		e.logger.Debug("blocked by robots", "url", req.URL.String())
+		logger.Debug("blocked by robots")
 		return
 	}
 
 	if err := e.limiter.Wait(ctx, req.URL.Hostname()); err != nil {
-		e.logger.Warn("domain limiter interrupted", "url", req.URL.String(), "error", err)
+		logger.Warn("domain limiter interrupted", "error", err)
 		return
 	}
 
 	page, err := e.fetchWithRetry(ctx, req)
 	if err != nil {
-		e.logger.Warn("fetch failed", "url", req.URL.String(), "error", err)
+		logger.Warn("fetch failed", "error", err)
 		return
 	}
 
 	if !e.isContentTypeAllowed(page.ContentType) {
-		e.logger.Debug("skipping unsupported content type", "url", req.URL.String(), "content_type", page.ContentType)
+		logger.Debug("skipping unsupported content type", "content_type", page.ContentType)
 		return
 	}
 
@@ -310,7 +320,7 @@ func (e *Engine) handleRequest(ctx context.Context, req types.CrawlRequest) {
 	if e.processor != nil {
 		cleaned, err := e.processor.Process(ctx, page)
 		if err != nil {
-			e.logger.Debug("processor error", "url", req.URL.String(), "error", err)
+			logger.Debug("processor error", "error", err)
 		} else {
 			result.Preprocessed = cleaned
 		}
@@ -318,7 +328,7 @@ func (e *Engine) handleRequest(ctx context.Context, req types.CrawlRequest) {
 
 	doc, directives, err := e.analyseDocument(page)
 	if err != nil {
-		e.logger.Debug("document analysis failed", "url", req.URL.String(), "error", err)
+		logger.Debug("document analysis failed", "error", err)
 	}
 	if directives.Title != "" {
 		metadata["title"] = directives.Title
@@ -377,11 +387,18 @@ func (e *Engine) handleRequest(ctx context.Context, req types.CrawlRequest) {
 
 	if shouldPersist && e.storage != nil {
 		if err := e.storage.Persist(ctx, result); err != nil {
-			e.logger.Error("persist failed", "url", req.URL.String(), "error", err)
+			logger.Error("persist failed", "error", err)
 		}
 	} else if !shouldPersist && e.storage != nil {
-		e.logger.Debug("skipping persistence due to noindex", "url", req.URL.String())
+		logger.Debug("skipping persistence due to noindex")
 	}
+
+	logger.Info("page processed",
+		"status", page.StatusCode,
+		"rendered", page.Rendered,
+		"latency_ms", page.ResponseLatency.Milliseconds(),
+		"links", len(links),
+	)
 
 	if req.Depth >= req.MaxDepth {
 		return
@@ -619,6 +636,7 @@ func (e *Engine) fetchWithRetry(ctx context.Context, req types.CrawlRequest) (*t
 
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
+		e.logger.Debug("fetch attempt", "url", req.URL.String(), "attempt", attempt+1)
 		page, err := e.fetcher.Fetch(ctx, req)
 		if err == nil {
 			if page != nil && shouldRetryStatus(page.StatusCode) && attempt < attempts-1 {
@@ -635,6 +653,7 @@ func (e *Engine) fetchWithRetry(ctx context.Context, req types.CrawlRequest) (*t
 			if delay > maxBackoff {
 				delay = maxBackoff
 			}
+			e.logger.Debug("backing off", "url", req.URL.String(), "delay", delay)
 			timer := time.NewTimer(delay)
 			select {
 			case <-timer.C:
@@ -645,6 +664,7 @@ func (e *Engine) fetchWithRetry(ctx context.Context, req types.CrawlRequest) (*t
 			timer.Stop()
 		}
 	}
+	e.logger.Warn("exhausted retries", "url", req.URL.String(), "error", lastErr)
 	return nil, lastErr
 }
 

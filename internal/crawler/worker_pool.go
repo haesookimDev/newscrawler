@@ -10,10 +10,11 @@ type job func(ctx context.Context)
 
 // WorkerPool coordinates crawl workers with a bounded queue to avoid deadlocks.
 type WorkerPool struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-	jobs   chan job
-	wg     sync.WaitGroup
+	ctx       context.Context
+	cancel    context.CancelFunc
+	jobs      chan job
+	wg        sync.WaitGroup
+	closeOnce sync.Once
 }
 
 // NewWorkerPool creates a pool with the given concurrency and queue size.
@@ -28,6 +29,10 @@ func NewWorkerPool(parent context.Context, concurrency, queueSize int) (*WorkerP
 		jobs:   make(chan job, queueSize),
 	}
 	pool.start(concurrency)
+	go func() {
+		<-ctx.Done()
+		pool.Close()
+	}()
 	return pool, nil
 }
 
@@ -36,16 +41,8 @@ func (p *WorkerPool) start(concurrency int) {
 		p.wg.Add(1)
 		go func() {
 			defer p.wg.Done()
-			for {
-				select {
-				case <-p.ctx.Done():
-					return
-				case job, ok := <-p.jobs:
-					if !ok {
-						return
-					}
-					job(p.ctx)
-				}
+			for job := range p.jobs {
+				job(p.ctx)
 			}
 		}()
 	}
@@ -65,7 +62,9 @@ func (p *WorkerPool) Submit(ctx context.Context, fn job) error {
 
 // Close drains the queue and stops all workers.
 func (p *WorkerPool) Close() {
-	p.cancel()
-	close(p.jobs)
-	p.wg.Wait()
+	p.closeOnce.Do(func() {
+		p.cancel()
+		close(p.jobs)
+		p.wg.Wait()
+	})
 }

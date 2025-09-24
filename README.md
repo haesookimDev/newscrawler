@@ -25,7 +25,7 @@ Each module is documented inline. Extend the configuration to suit deployment en
 ## Configuration
 
 - Base configuration lives in YAML (see `configs/example.yaml`). It includes:
-  - SQL database connection and pooling settings.
+  - SQL database connection, pooling settings, and `create_if_missing` to auto-provision the target database when supported (PostgreSQL).
   - Vector database metadata for embedding upserts.
   - Crawl seeds, per-domain throttling, robots overrides, footprint sizing, and crawl politeness controls such as `max_body_bytes`, `allowed_content_types`, canonical/meta-robots respect flags, and `discovery.respect_nofollow`.
   - Preprocessing flags (ad removal selectors, script/style stripping).
@@ -36,6 +36,11 @@ Each module is documented inline. Extend the configuration to suit deployment en
 
 ```bash
 go run ./cmd/newscrawler --config configs/example.yaml
+```
+
+```bash
+go build ./cmd/newscrawler
+./newscrawler --config <config-path>
 ```
 
 - The crawler observes `robots.txt` unless a host is listed under `robots.overrides`.
