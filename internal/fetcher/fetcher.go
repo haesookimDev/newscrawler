@@ -1,6 +1,8 @@
 package fetcher
 
 import (
+	"compress/flate"
+	"compress/gzip"
 	"context"
 	"errors"
 	"fmt"
@@ -10,6 +12,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/andybalholm/brotli"
 
 	"newscrawler/pkg/types"
 )
@@ -106,15 +110,10 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, req types.CrawlRequest) (*types
 	if err != nil {
 		return nil, fmt.Errorf("http fetch failed: %w", err)
 	}
-	defer resp.Body.Close()
 
-	limited := io.LimitReader(resp.Body, f.maxBodyBytes+1)
-	body, err := io.ReadAll(limited)
+	body, err := f.readBody(resp)
 	if err != nil {
-		return nil, fmt.Errorf("read body: %w", err)
-	}
-	if int64(len(body)) > f.maxBodyBytes {
-		return nil, fmt.Errorf("response body exceeds limit of %d bytes", f.maxBodyBytes)
+		return nil, err
 	}
 
 	var finalURL *url.URL
@@ -137,6 +136,48 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, req types.CrawlRequest) (*types
 	}
 
 	return page, nil
+}
+
+func (f *HTTPFetcher) readBody(resp *http.Response) ([]byte, error) {
+	if resp == nil || resp.Body == nil {
+		return nil, errors.New("empty response body")
+	}
+
+	reader := io.Reader(resp.Body)
+	closers := []io.Closer{resp.Body}
+
+	encoding := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
+	switch encoding {
+	case "gzip":
+		gz, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("gzip decode: %w", err)
+		}
+		reader = gz
+		closers = append(closers, gz)
+	case "br":
+		reader = brotli.NewReader(resp.Body)
+	case "deflate":
+		fl := flate.NewReader(resp.Body)
+		reader = fl
+		closers = append(closers, fl)
+	}
+
+	defer func() {
+		for i := len(closers) - 1; i >= 0; i-- {
+			_ = closers[i].Close()
+		}
+	}()
+
+	limited := io.LimitReader(reader, f.maxBodyBytes+1)
+	body, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, fmt.Errorf("read body: %w", err)
+	}
+	if int64(len(body)) > f.maxBodyBytes {
+		return nil, fmt.Errorf("response body exceeds limit of %d bytes", f.maxBodyBytes)
+	}
+	return body, nil
 }
 
 // Client exposes the underlying HTTP client for reuse (eg. robots.txt fetches).

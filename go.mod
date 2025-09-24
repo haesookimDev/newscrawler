@@ -4,9 +4,11 @@ go 1.24.1
 
 require (
 	github.com/PuerkitoBio/goquery v1.10.3
+	github.com/andybalholm/brotli v1.2.0
 	github.com/chromedp/chromedp v0.14.1
 	github.com/lib/pq v1.10.9
 	github.com/temoto/robotstxt v1.1.2
+	golang.org/x/time v0.13.0
 )
 
 require (

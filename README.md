@@ -27,7 +27,7 @@ Each module is documented inline. Extend the configuration to suit deployment en
 - Base configuration lives in YAML (see `configs/example.yaml`). It includes:
   - SQL database connection and pooling settings.
   - Vector database metadata for embedding upserts.
-  - Crawl seeds, per-domain throttling, robots overrides, and footprint sizing.
+  - Crawl seeds, per-domain throttling, robots overrides, footprint sizing, and crawl politeness controls such as `max_body_bytes`, `allowed_content_types`, canonical/meta-robots respect flags, and `discovery.respect_nofollow`.
   - Preprocessing flags (ad removal selectors, script/style stripping).
   - Rendering options for headless Chromium via `chromedp` when JavaScript execution is required.
 - Durations use Go's syntax (`500ms`, `15s`, `24h`). Lists such as `allowed_domains` drive host-level filtering.

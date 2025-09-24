@@ -56,19 +56,23 @@ type WorkerConfig struct {
 
 // CrawlConfig controls the crawl frontier, limits, and throttling.
 type CrawlConfig struct {
-	Seeds              []SeedConfig      `yaml:"seeds"`
-	MaxDepth           int               `yaml:"max_depth"`
-	MaxPages           int               `yaml:"max_pages"`
-	UserAgent          string            `yaml:"user_agent"`
-	Headers            map[string]string `yaml:"headers"`
-	ProxyURL           string            `yaml:"proxy_url"`
-	AllowedDomains     []string          `yaml:"allowed_domains"`
-	ExcludedDomains    []string          `yaml:"excluded_domains"`
-	PerDomainDelay     Duration          `yaml:"per_domain_delay"`
-	RateLimitPerDomain RateLimitConfig   `yaml:"rate_limit_per_domain"`
-	RequestTimeout     Duration          `yaml:"request_timeout"`
-	Discovery          DiscoveryConfig   `yaml:"discovery"`
-	Footprint          FootprintConfig   `yaml:"footprint"`
+	Seeds               []SeedConfig      `yaml:"seeds"`
+	MaxDepth            int               `yaml:"max_depth"`
+	MaxPages            int               `yaml:"max_pages"`
+	UserAgent           string            `yaml:"user_agent"`
+	Headers             map[string]string `yaml:"headers"`
+	ProxyURL            string            `yaml:"proxy_url"`
+	AllowedDomains      []string          `yaml:"allowed_domains"`
+	ExcludedDomains     []string          `yaml:"excluded_domains"`
+	PerDomainDelay      Duration          `yaml:"per_domain_delay"`
+	RateLimitPerDomain  RateLimitConfig   `yaml:"rate_limit_per_domain"`
+	RequestTimeout      Duration          `yaml:"request_timeout"`
+	Discovery           DiscoveryConfig   `yaml:"discovery"`
+	Footprint           FootprintConfig   `yaml:"footprint"`
+	MaxBodyBytes        int64             `yaml:"max_body_bytes"`
+	AllowedContentTypes []string          `yaml:"allowed_content_types"`
+	RespectCanonical    bool              `yaml:"respect_canonical"`
+	RespectMetaRobots   bool              `yaml:"respect_meta_robots"`
 }
 
 // SeedConfig declares an initial URL and optional depth override for the crawl frontier.
@@ -90,6 +94,7 @@ type DiscoveryConfig struct {
 	IncludePatterns  []string `yaml:"include_patterns"`
 	ExcludePatterns  []string `yaml:"exclude_patterns"`
 	MinContentLength int      `yaml:"min_content_length"`
+	RespectNofollow  bool     `yaml:"respect_nofollow"`
 }
 
 // FootprintConfig controls how aggressively the crawler remembers visited nodes.
@@ -149,9 +154,17 @@ func Default() Config {
 			Headers:        map[string]string{},
 			PerDomainDelay: DurationFrom(250 * time.Millisecond),
 			RequestTimeout: DurationFrom(10 * time.Second),
+			MaxBodyBytes:   6 * 1024 * 1024,
+			AllowedContentTypes: []string{
+				"text/html",
+				"application/xhtml+xml",
+			},
+			RespectCanonical:  true,
+			RespectMetaRobots: true,
 			Discovery: DiscoveryConfig{
 				FollowExternal:  false,
 				MaxLinksPerPage: 200,
+				RespectNofollow: true,
 			},
 			Footprint: FootprintConfig{
 				Enabled:    true,
@@ -264,6 +277,9 @@ func (c Config) Validate() error {
 	if rl := c.Crawl.RateLimitPerDomain; rl.Requests < 0 {
 		return fmt.Errorf("crawl.rate_limit_per_domain.requests must be >= 0 (got %d)", rl.Requests)
 	}
+	if c.Crawl.MaxBodyBytes <= 0 {
+		return fmt.Errorf("crawl.max_body_bytes must be > 0 (got %d)", c.Crawl.MaxBodyBytes)
+	}
 	if strings.TrimSpace(c.Crawl.UserAgent) == "" {
 		return errors.New("crawl.user_agent must be set")
 	}
@@ -303,6 +319,9 @@ func (c *Config) normalise() {
 	}
 	if len(c.Crawl.ExcludedDomains) > 0 {
 		c.Crawl.ExcludedDomains = dedupeLower(c.Crawl.ExcludedDomains)
+	}
+	if len(c.Crawl.AllowedContentTypes) > 0 {
+		c.Crawl.AllowedContentTypes = dedupeLower(c.Crawl.AllowedContentTypes)
 	}
 }
 

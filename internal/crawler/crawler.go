@@ -10,10 +10,13 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/PuerkitoBio/goquery"
 
@@ -38,8 +41,9 @@ type Engine struct {
 
 	logger *slog.Logger
 
-	allowed  map[string]struct{}
-	excluded map[string]struct{}
+	allowed             map[string]struct{}
+	excluded            map[string]struct{}
+	allowedContentTypes map[string]struct{}
 
 	includePatterns []*regexp.Regexp
 	excludePatterns []*regexp.Regexp
@@ -52,6 +56,11 @@ type Engine struct {
 
 	closers   []func() error
 	closeOnce sync.Once
+
+	respectCanonical  bool
+	respectMetaRobots bool
+	respectNofollow   bool
+	minContentLength  int
 }
 
 // NewEngine builds a crawler engine from configuration.
@@ -65,7 +74,7 @@ func NewEngine(cfg config.Config) (*Engine, error) {
 		UserAgent:    cfg.Crawl.UserAgent,
 		Headers:      cfg.Crawl.Headers,
 		Timeout:      cfg.Crawl.RequestTimeout.Duration,
-		MaxBodyBytes: 6 * 1024 * 1024,
+		MaxBodyBytes: cfg.Crawl.MaxBodyBytes,
 		ProxyURL:     cfg.Crawl.ProxyURL,
 	})
 	if err != nil {
@@ -80,7 +89,7 @@ func NewEngine(cfg config.Config) (*Engine, error) {
 				Timeout:            cfg.Rendering.Timeout.Duration,
 				WaitForSelector:    cfg.Rendering.WaitForSelector,
 				UserAgent:          cfg.Crawl.UserAgent,
-				MaxBodyBytes:       6 * 1024 * 1024,
+				MaxBodyBytes:       cfg.Crawl.MaxBodyBytes,
 				DisableHeadless:    cfg.Rendering.DisableHeadless,
 				ConcurrentSessions: cfg.Rendering.ConcurrentSessions,
 			})
@@ -113,8 +122,11 @@ func NewEngine(cfg config.Config) (*Engine, error) {
 	}
 	pipeline := storage.NewPipeline(relational, vector)
 
-	footprint := NewFootprint(cfg.Crawl.Footprint.MaxEntries)
-	limiter := NewDomainLimiter(cfg.Crawl.PerDomainDelay.Duration)
+	footprint := NewFootprint(cfg.Crawl.Footprint.MaxEntries, cfg.Crawl.Footprint.TTL.Duration, cfg.Crawl.Footprint.Enabled)
+	limiter := NewDomainLimiter(cfg.Crawl.PerDomainDelay.Duration, RateLimiterSettings{
+		Requests: cfg.Crawl.RateLimitPerDomain.Requests,
+		Window:   cfg.Crawl.RateLimitPerDomain.Window.Duration,
+	})
 
 	allowed := make(map[string]struct{}, len(cfg.Crawl.AllowedDomains))
 	for _, v := range cfg.Crawl.AllowedDomains {
@@ -123,6 +135,14 @@ func NewEngine(cfg config.Config) (*Engine, error) {
 	excluded := make(map[string]struct{}, len(cfg.Crawl.ExcludedDomains))
 	for _, v := range cfg.Crawl.ExcludedDomains {
 		excluded[v] = struct{}{}
+	}
+	allowedTypes := make(map[string]struct{}, len(cfg.Crawl.AllowedContentTypes))
+	for _, ct := range cfg.Crawl.AllowedContentTypes {
+		ct = strings.TrimSpace(strings.ToLower(ct))
+		if ct == "" {
+			continue
+		}
+		allowedTypes[ct] = struct{}{}
 	}
 
 	include, err := compilePatterns(cfg.Crawl.Discovery.IncludePatterns)
@@ -140,20 +160,25 @@ func NewEngine(cfg config.Config) (*Engine, error) {
 	}
 
 	return &Engine{
-		cfg:             cfg,
-		fetcher:         composite,
-		processor:       proc,
-		robots:          robots,
-		storage:         pipeline,
-		limiter:         limiter,
-		footprint:       footprint,
-		logger:          logger,
-		allowed:         allowed,
-		excluded:        excluded,
-		includePatterns: include,
-		excludePatterns: exclude,
-		maxPages:        maxPages,
-		closers:         closers,
+		cfg:                 cfg,
+		fetcher:             composite,
+		processor:           proc,
+		robots:              robots,
+		storage:             pipeline,
+		limiter:             limiter,
+		footprint:           footprint,
+		logger:              logger,
+		allowed:             allowed,
+		excluded:            excluded,
+		allowedContentTypes: allowedTypes,
+		includePatterns:     include,
+		excludePatterns:     exclude,
+		maxPages:            maxPages,
+		closers:             closers,
+		respectCanonical:    cfg.Crawl.RespectCanonical,
+		respectMetaRobots:   cfg.Crawl.RespectMetaRobots,
+		respectNofollow:     cfg.Crawl.Discovery.RespectNofollow,
+		minContentLength:    cfg.Crawl.Discovery.MinContentLength,
 	}, nil
 }
 
@@ -242,13 +267,14 @@ func (e *Engine) enqueue(ctx context.Context, req types.CrawlRequest) {
 }
 
 func (e *Engine) handleRequest(ctx context.Context, req types.CrawlRequest) {
-	if ctx.Err() != nil {
+	if ctx.Err() != nil || req.URL == nil {
 		return
 	}
 
+	defer e.footprint.MarkExplored(req.URL, req.Depth)
+
 	if !e.robots.Allowed(ctx, req.URL) {
 		e.logger.Debug("blocked by robots", "url", req.URL.String())
-		e.footprint.MarkExplored(req.URL, req.Depth)
 		return
 	}
 
@@ -257,43 +283,124 @@ func (e *Engine) handleRequest(ctx context.Context, req types.CrawlRequest) {
 		return
 	}
 
-	page, err := e.fetcher.Fetch(ctx, req)
+	page, err := e.fetchWithRetry(ctx, req)
 	if err != nil {
 		e.logger.Warn("fetch failed", "url", req.URL.String(), "error", err)
 		return
 	}
 
-	result := types.CrawlResult{Request: req, Page: page}
-
-	cleaned, err := e.processor.Process(ctx, page)
-	if err != nil {
-		e.logger.Debug("processor error", "url", req.URL.String(), "error", err)
-	} else {
-		result.Preprocessed = cleaned
+	if !e.isContentTypeAllowed(page.ContentType) {
+		e.logger.Debug("skipping unsupported content type", "url", req.URL.String(), "content_type", page.ContentType)
+		return
 	}
 
-	links := e.extractLinks(page)
-	result.Links = links
+	metadata := map[string]string{
+		"content_length": strconv.Itoa(len(page.Body)),
+		"status_code":    strconv.Itoa(page.StatusCode),
+	}
+	if ct := normaliseContentType(page.ContentType); ct != "" {
+		metadata["content_type"] = ct
+	}
+	if page.ResponseLatency > 0 {
+		metadata["response_time_ms"] = strconv.FormatInt(page.ResponseLatency.Milliseconds(), 10)
+	}
 
-	if e.storage != nil {
-		if err := e.storage.Persist(ctx, result); err != nil {
-			e.logger.Error("persist failed", "url", req.URL.String(), "error", err)
+	result := types.CrawlResult{Request: req, Page: page, Metadata: metadata}
+
+	if e.processor != nil {
+		cleaned, err := e.processor.Process(ctx, page)
+		if err != nil {
+			e.logger.Debug("processor error", "url", req.URL.String(), "error", err)
+		} else {
+			result.Preprocessed = cleaned
 		}
 	}
 
-	if len(links) == 0 || req.Depth >= req.MaxDepth {
-		e.footprint.MarkExplored(req.URL, req.Depth)
+	doc, directives, err := e.analyseDocument(page)
+	if err != nil {
+		e.logger.Debug("document analysis failed", "url", req.URL.String(), "error", err)
+	}
+	if directives.Title != "" {
+		metadata["title"] = directives.Title
+	}
+	if directives.Description != "" {
+		metadata["description"] = directives.Description
+	}
+	if directives.Language != "" {
+		metadata["language"] = directives.Language
+	}
+	if directives.MetaRobots != "" {
+		metadata["meta_robots"] = directives.MetaRobots
+	}
+	if directives.Noindex {
+		metadata["robots:noindex"] = "true"
+	}
+	if directives.Nofollow {
+		metadata["robots:nofollow"] = "true"
+	}
+	if directives.Canonical != nil {
+		metadata["canonical_url"] = directives.Canonical.String()
+	}
+	if e.respectCanonical && directives.Canonical != nil && e.acceptLink(req.URL, directives.Canonical) {
+		page.FinalURL = directives.Canonical
+	}
+
+	followLinks := true
+	if e.respectNofollow && directives.Nofollow {
+		followLinks = false
+	}
+
+	if e.minContentLength > 0 && len(page.Body) < e.minContentLength {
+		metadata["thin_content"] = "true"
+		followLinks = false
+	}
+
+	var baseURL *url.URL
+	if directives.Base != nil {
+		baseURL = directives.Base
+	} else if page.FinalURL != nil {
+		baseURL = page.FinalURL
+	} else {
+		baseURL = page.URL
+	}
+
+	var links []*url.URL
+	if followLinks && doc != nil && baseURL != nil {
+		links = e.extractLinks(doc, baseURL)
+	}
+	result.Links = links
+
+	shouldPersist := true
+	if e.respectMetaRobots && directives.Noindex {
+		shouldPersist = false
+	}
+
+	if shouldPersist && e.storage != nil {
+		if err := e.storage.Persist(ctx, result); err != nil {
+			e.logger.Error("persist failed", "url", req.URL.String(), "error", err)
+		}
+	} else if !shouldPersist && e.storage != nil {
+		e.logger.Debug("skipping persistence due to noindex", "url", req.URL.String())
 	}
 
 	if req.Depth >= req.MaxDepth {
 		return
 	}
 
+	if len(links) == 0 {
+		return
+	}
+
+	parent := page.FinalURL
+	if parent == nil {
+		parent = req.URL
+	}
+
 	for _, link := range links {
 		child := types.CrawlRequest{
 			URL:       link,
 			Depth:     req.Depth + 1,
-			Parent:    req.URL,
+			Parent:    parent,
 			Render:    e.cfg.Rendering.Enabled,
 			SeedLabel: req.SeedLabel,
 			MaxDepth:  req.MaxDepth,
@@ -304,6 +411,10 @@ func (e *Engine) handleRequest(ctx context.Context, req types.CrawlRequest) {
 
 func (e *Engine) shouldVisit(req types.CrawlRequest) bool {
 	if req.URL == nil {
+		return false
+	}
+	scheme := strings.ToLower(req.URL.Scheme)
+	if scheme != "http" && scheme != "https" {
 		return false
 	}
 	host := strings.ToLower(req.URL.Hostname())
@@ -331,22 +442,8 @@ func (e *Engine) shouldVisit(req types.CrawlRequest) bool {
 	return true
 }
 
-func (e *Engine) extractLinks(page *types.Page) []*url.URL {
-	if page == nil || len(page.Body) == 0 {
-		return nil
-	}
-
-	base := page.FinalURL
-	if base == nil {
-		base = page.URL
-	}
-	if base == nil {
-		return nil
-	}
-
-	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(page.Body))
-	if err != nil {
-		e.logger.Debug("link extraction failed", "error", err)
+func (e *Engine) extractLinks(doc *goquery.Document, base *url.URL) []*url.URL {
+	if doc == nil || base == nil {
 		return nil
 	}
 
@@ -363,27 +460,39 @@ func (e *Engine) extractLinks(page *types.Page) []*url.URL {
 			return true
 		}
 		href = strings.TrimSpace(href)
-		if href == "" {
+		if href == "" || href == "#" {
 			return true
 		}
-		if strings.HasPrefix(href, "javascript:") || strings.HasPrefix(href, "mailto:") {
+		lower := strings.ToLower(href)
+		if strings.HasPrefix(lower, "javascript:") || strings.HasPrefix(lower, "mailto:") || strings.HasPrefix(lower, "tel:") || strings.HasPrefix(lower, "data:") {
 			return true
+		}
+		if idx := strings.IndexRune(href, '#'); idx == 0 {
+			return true
+		} else if idx > 0 {
+			href = href[:idx]
 		}
 
-		u, err := base.Parse(href)
-		if err != nil {
+		if e.respectNofollow {
+			if rel, ok := s.Attr("rel"); ok && hasDirective(rel, "nofollow") {
+				return true
+			}
+		}
+
+		target, err := base.Parse(href)
+		if err != nil || target == nil {
 			return true
 		}
-		u.Fragment = ""
-		if !e.acceptLink(base, u) {
+		target.Fragment = ""
+		if !e.acceptLink(base, target) {
 			return true
 		}
-		key := u.String()
+		key := target.String()
 		if _, exists := seen[key]; exists {
 			return true
 		}
 		seen[key] = struct{}{}
-		links = append(links, u)
+		links = append(links, target)
 		if len(links) >= maxLinks {
 			return false
 		}
@@ -495,6 +604,250 @@ func sameDomain(a, b *url.URL) bool {
 		return false
 	}
 	return strings.EqualFold(a.Hostname(), b.Hostname())
+}
+
+func (e *Engine) fetchWithRetry(ctx context.Context, req types.CrawlRequest) (*types.Page, error) {
+	attempts := e.cfg.Worker.MaxRetries + 1
+	if attempts <= 0 {
+		attempts = 1
+	}
+	backoff := e.cfg.Worker.RetryBackoff.Duration
+	if backoff <= 0 {
+		backoff = 500 * time.Millisecond
+	}
+	const maxBackoff = 30 * time.Second
+
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		page, err := e.fetcher.Fetch(ctx, req)
+		if err == nil {
+			if page != nil && shouldRetryStatus(page.StatusCode) && attempt < attempts-1 {
+				lastErr = fmt.Errorf("retryable status %d", page.StatusCode)
+			} else {
+				return page, err
+			}
+		} else {
+			lastErr = err
+		}
+
+		if attempt < attempts-1 {
+			delay := backoff * time.Duration(1<<attempt)
+			if delay > maxBackoff {
+				delay = maxBackoff
+			}
+			timer := time.NewTimer(delay)
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, ctx.Err()
+			}
+			timer.Stop()
+		}
+	}
+	return nil, lastErr
+}
+
+func shouldRetryStatus(code int) bool {
+	if code == 0 {
+		return true
+	}
+	if code == 429 {
+		return true
+	}
+	return code >= 500 && code < 600
+}
+
+func (e *Engine) isContentTypeAllowed(ct string) bool {
+	if len(e.allowedContentTypes) == 0 {
+		return true
+	}
+	norm := normaliseContentType(ct)
+	if norm == "" {
+		return false
+	}
+	_, ok := e.allowedContentTypes[norm]
+	return ok
+}
+
+func normaliseContentType(ct string) string {
+	if ct == "" {
+		return ""
+	}
+	parts := strings.Split(ct, ";")
+	main := strings.TrimSpace(strings.ToLower(parts[0]))
+	return main
+}
+
+type pageDirectives struct {
+	Base        *url.URL
+	Canonical   *url.URL
+	Title       string
+	Description string
+	Language    string
+	MetaRobots  string
+	Noindex     bool
+	Nofollow    bool
+}
+
+func (e *Engine) analyseDocument(page *types.Page) (*goquery.Document, pageDirectives, error) {
+	directives := pageDirectives{}
+	if page == nil || len(page.Body) == 0 {
+		return nil, directives, fmt.Errorf("page body empty")
+	}
+
+	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(page.Body))
+	if err != nil {
+		return nil, directives, fmt.Errorf("parse html: %w", err)
+	}
+
+	directives.Title = strings.TrimSpace(doc.Find("title").First().Text())
+	if desc, ok := doc.Find("meta[name='description']").Attr("content"); ok {
+		directives.Description = strings.TrimSpace(desc)
+	}
+
+	if html := doc.Find("html").First(); html.Length() > 0 {
+		if lang, ok := html.Attr("lang"); ok {
+			directives.Language = strings.TrimSpace(lang)
+		}
+	}
+	if directives.Language == "" {
+		if lang, ok := doc.Find("meta[http-equiv='content-language']").Attr("content"); ok {
+			directives.Language = strings.TrimSpace(lang)
+		}
+	}
+	if directives.Language == "" {
+		if lang, ok := doc.Find("meta[name='language']").Attr("content"); ok {
+			directives.Language = strings.TrimSpace(lang)
+		}
+	}
+
+	baseRef := page.FinalURL
+	if baseRef == nil {
+		baseRef = page.URL
+	}
+	if href, ok := doc.Find("base[href]").First().Attr("href"); ok {
+		if resolved := resolveURL(baseRef, strings.TrimSpace(href)); resolved != nil {
+			directives.Base = resolved
+		}
+	}
+	if directives.Base == nil {
+		directives.Base = baseRef
+	}
+
+	if canonicalHref, ok := doc.Find("link[rel='canonical']").First().Attr("href"); ok {
+		if resolved := resolveURL(directives.Base, strings.TrimSpace(canonicalHref)); resolved != nil {
+			directives.Canonical = resolved
+		}
+	}
+
+	robots := collectMetaRobots(doc)
+	if len(robots) > 0 {
+		directives.MetaRobots = strings.Join(robots, ",")
+	}
+	directives.Noindex = containsDirective(robots, "noindex") || containsDirective(robots, "none")
+	directives.Nofollow = containsDirective(robots, "nofollow") || containsDirective(robots, "none")
+
+	return doc, directives, nil
+}
+
+func resolveURL(base *url.URL, href string) *url.URL {
+	if strings.TrimSpace(href) == "" {
+		return nil
+	}
+	if base == nil {
+		u, err := url.Parse(href)
+		if err != nil {
+			return nil
+		}
+		u.Fragment = ""
+		return u
+	}
+	u, err := base.Parse(href)
+	if err != nil {
+		return nil
+	}
+	u.Fragment = ""
+	return u
+}
+
+func collectMetaRobots(doc *goquery.Document) []string {
+	if doc == nil {
+		return nil
+	}
+	directives := make(map[string]struct{})
+	doc.Find("meta[name]").Each(func(_ int, s *goquery.Selection) {
+		name, ok := s.Attr("name")
+		if !ok {
+			return
+		}
+		if !strings.EqualFold(name, "robots") {
+			return
+		}
+		content, ok := s.Attr("content")
+		if !ok {
+			return
+		}
+		for _, token := range splitDirectives(content) {
+			directives[token] = struct{}{}
+		}
+	})
+	if len(directives) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(directives))
+	for token := range directives {
+		result = append(result, token)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func splitDirectives(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		if r == ',' || r == ';' {
+			return true
+		}
+		return unicode.IsSpace(r)
+	})
+	if len(fields) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(fields))
+	result := make([]string, 0, len(fields))
+	for _, field := range fields {
+		norm := strings.TrimSpace(strings.ToLower(field))
+		if norm == "" {
+			continue
+		}
+		if _, ok := seen[norm]; ok {
+			continue
+		}
+		seen[norm] = struct{}{}
+		result = append(result, norm)
+	}
+	return result
+}
+
+func containsDirective(tokens []string, target string) bool {
+	for _, token := range tokens {
+		if token == target {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDirective(raw string, directive string) bool {
+	for _, token := range splitDirectives(raw) {
+		if token == directive {
+			return true
+		}
+	}
+	return false
 }
 
 func buildLogger(cfg config.LoggingConfig) (*slog.Logger, error) {

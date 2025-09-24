@@ -41,6 +41,12 @@ crawl:
     requests: 0
     window: 0s
   request_timeout: 10s
+  max_body_bytes: 6291456
+  allowed_content_types:
+    - text/html
+    - application/xhtml+xml
+  respect_canonical: true
+  respect_meta_robots: true
   discovery:
     follow_external: false
     max_links_per_page: 200
@@ -48,6 +54,7 @@ crawl:
     exclude_patterns:
       - "\\?reply="
     min_content_length: 500
+    respect_nofollow: true
   footprint:
     enabled: true
     ttl: 24h
