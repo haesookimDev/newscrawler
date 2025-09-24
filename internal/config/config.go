@@ -33,6 +33,7 @@ type SQLConfig struct {
 	ConnMaxLifetime Duration `yaml:"conn_max_lifetime"`
 	MigrationsPath  string   `yaml:"migrations_path"`
 	CreateIfMissing bool     `yaml:"create_if_missing"`
+	AutoMigrate     bool     `yaml:"auto_migrate"`
 }
 
 // VectorDBConfig describes a vector database used to store embeddings or semantic features.
@@ -201,6 +202,9 @@ func Default() Config {
 		Logging: LoggingConfig{
 			Level:      "info",
 			Structured: true,
+		},
+		DB: SQLConfig{
+			AutoMigrate: true,
 		},
 	}
 }

@@ -89,7 +89,8 @@ func (p *Pipeline) Persist(ctx context.Context, result types.CrawlResult) error 
 
 // SQLWriter is a simple relational store example backed by database/sql.
 type SQLWriter struct {
-	db *sql.DB
+	db          *sql.DB
+	autoMigrate bool
 }
 
 // NewSQLWriter initialises a SQLWriter from configuration.
@@ -130,7 +131,16 @@ func NewSQLWriter(cfg config.SQLConfig) (*SQLWriter, error) {
 	if cfg.ConnMaxLifetime.Duration > 0 {
 		db.SetConnMaxLifetime(cfg.ConnMaxLifetime.Duration)
 	}
-	return &SQLWriter{db: db}, nil
+	writer := &SQLWriter{
+		db:          db,
+		autoMigrate: cfg.AutoMigrate,
+	}
+	if cfg.AutoMigrate {
+		if err := writer.ensureSchema(context.Background()); err != nil {
+			return nil, err
+		}
+	}
+	return writer, nil
 }
 
 // SavePage inserts the crawl document into a generic pages table.
@@ -138,6 +148,22 @@ func (s *SQLWriter) SavePage(ctx context.Context, doc Document) error {
 	if s == nil || s.db == nil {
 		return nil
 	}
+	if err := s.upsertPage(ctx, doc); err != nil {
+		if s.autoMigrate && isUndefinedTableErr(err) {
+			if schemaErr := s.ensureSchema(ctx); schemaErr != nil {
+				return fmt.Errorf("ensure schema: %w", schemaErr)
+			}
+			if retryErr := s.upsertPage(ctx, doc); retryErr != nil {
+				return fmt.Errorf("insert page: %w", retryErr)
+			}
+			return nil
+		}
+		return fmt.Errorf("insert page: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLWriter) upsertPage(ctx context.Context, doc Document) error {
 	query := `
         INSERT INTO pages (url, final_url, depth, retrieved_at, status_code, raw_html, clean_html)
         VALUES ($1,$2,$3,$4,$5,$6,$7)
@@ -149,7 +175,7 @@ func (s *SQLWriter) SavePage(ctx context.Context, doc Document) error {
             raw_html = EXCLUDED.raw_html,
             clean_html = EXCLUDED.clean_html
     `
-	_, err := s.db.ExecContext(ctx, query,
+	if _, err := s.db.ExecContext(ctx, query,
 		doc.URL,
 		doc.FinalURL,
 		doc.Depth,
@@ -157,9 +183,8 @@ func (s *SQLWriter) SavePage(ctx context.Context, doc Document) error {
 		doc.StatusCode,
 		doc.HTML,
 		doc.CleanHTML,
-	)
-	if err != nil {
-		return fmt.Errorf("insert page: %w", err)
+	); err != nil {
+		return err
 	}
 	return nil
 }
@@ -222,4 +247,44 @@ func createDatabase(ctx context.Context, cfg config.SQLConfig) error {
 		return fmt.Errorf("create database %q: %w", dbName, err)
 	}
 	return nil
+}
+
+func (s *SQLWriter) ensureSchema(ctx context.Context) error {
+	if s == nil || s.db == nil || !s.autoMigrate {
+		return nil
+	}
+	schemaCtx := ctx
+	if schemaCtx == nil || schemaCtx.Err() != nil {
+		schemaCtx = context.Background()
+	}
+	schemaCtx, cancel := context.WithTimeout(schemaCtx, 10*time.Second)
+	defer cancel()
+
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS pages (
+		    url TEXT PRIMARY KEY,
+		    final_url TEXT,
+		    depth INT,
+		    retrieved_at TIMESTAMPTZ,
+		    status_code INT,
+		    raw_html BYTEA,
+		    clean_html BYTEA
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_pages_retrieved_at ON pages (retrieved_at DESC)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := s.db.ExecContext(schemaCtx, stmt); err != nil {
+			return fmt.Errorf("apply schema: %w", err)
+		}
+	}
+	return nil
+}
+
+func isUndefinedTableErr(err error) bool {
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) {
+		return pqErr.Code == "42P01"
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "relation") && strings.Contains(lower, "does not exist")
 }

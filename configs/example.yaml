@@ -6,6 +6,7 @@ db:
   conn_max_lifetime: 15m
   migrations_path: migrations
   create_if_missing: true
+  auto_migrate: true
 
 vector_db:
   provider: pinecone
