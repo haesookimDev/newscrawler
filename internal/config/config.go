@@ -22,6 +22,7 @@ type Config struct {
 	Robots     RobotsConfig     `yaml:"robots"`
 	Rendering  RenderingConfig  `yaml:"rendering"`
 	Logging    LoggingConfig    `yaml:"logging"`
+	Media      MediaConfig      `yaml:"media"`
 }
 
 // SQLConfig describes a relational database connection used for persistence.
@@ -134,6 +135,15 @@ type RenderingConfig struct {
 	DisableHeadless    bool     `yaml:"disable_headless"`
 }
 
+// MediaConfig controls asset extraction and storage.
+type MediaConfig struct {
+	Enabled             bool     `yaml:"enabled"`
+	Directory           string   `yaml:"directory"`
+	MaxPerPage          int      `yaml:"max_per_page"`
+	MaxSizeBytes        int64    `yaml:"max_size_bytes"`
+	AllowedContentTypes []string `yaml:"allowed_content_types"`
+}
+
 // LoggingConfig selects log verbosity and format.
 type LoggingConfig struct {
 	Level      string `yaml:"level"`
@@ -205,6 +215,18 @@ func Default() Config {
 		},
 		DB: SQLConfig{
 			AutoMigrate: true,
+		},
+		Media: MediaConfig{
+			Enabled:      false,
+			Directory:    "",
+			MaxPerPage:   8,
+			MaxSizeBytes: 2 * 1024 * 1024,
+			AllowedContentTypes: []string{
+				"image/jpeg",
+				"image/png",
+				"image/webp",
+				"image/gif",
+			},
 		},
 	}
 }
@@ -291,6 +313,20 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.Robots.UserAgent) == "" {
 		return errors.New("robots.user_agent must be set")
 	}
+	if c.Media.Enabled {
+		if strings.TrimSpace(c.Media.Directory) == "" {
+			return errors.New("media.directory must be set when media.enabled is true")
+		}
+		if c.Media.MaxPerPage < 0 {
+			return fmt.Errorf("media.max_per_page must be >= 0 (got %d)", c.Media.MaxPerPage)
+		}
+		if c.Media.MaxSizeBytes <= 0 {
+			return fmt.Errorf("media.max_size_bytes must be > 0 (got %d)", c.Media.MaxSizeBytes)
+		}
+		if len(c.Media.AllowedContentTypes) == 0 {
+			return errors.New("media.allowed_content_types must include at least one value")
+		}
+	}
 	return nil
 }
 
@@ -327,6 +363,10 @@ func (c *Config) normalise() {
 	}
 	if len(c.Crawl.AllowedContentTypes) > 0 {
 		c.Crawl.AllowedContentTypes = dedupeLower(c.Crawl.AllowedContentTypes)
+	}
+	c.Media.Directory = strings.TrimSpace(c.Media.Directory)
+	if len(c.Media.AllowedContentTypes) > 0 {
+		c.Media.AllowedContentTypes = dedupeLower(c.Media.AllowedContentTypes)
 	}
 }
 

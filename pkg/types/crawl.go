@@ -39,6 +39,19 @@ type CrawlResult struct {
 	RobotsIgnored bool
 	Preprocessed  []byte
 	Metadata      map[string]string
+	Images        []ImageAsset
+}
+
+// ImageAsset captures extracted image payloads associated with a page.
+type ImageAsset struct {
+	SourceURL   string
+	AltText     string
+	ContentType string
+	Data        []byte
+	SizeBytes   int64
+	StoredPath  string
+	Width       int
+	Height      int
 }
 
 // FootprintState tracks crawl completion for a URL at a specific depth.

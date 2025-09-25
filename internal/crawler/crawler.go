@@ -5,10 +5,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
+	"io"
 	"log/slog"
 	"math"
+	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -61,6 +68,12 @@ type Engine struct {
 	respectMetaRobots bool
 	respectNofollow   bool
 	minContentLength  int
+	mediaEnabled      bool
+	imageClient       *http.Client
+	imageAllowedTypes map[string]struct{}
+	maxImagesPerPage  int
+	maxImageBytes     int64
+	imageAcceptLang   string
 }
 
 // NewEngine builds a crawler engine from configuration.
@@ -120,7 +133,22 @@ func NewEngine(cfg config.Config) (*Engine, error) {
 	if cfg.VectorDB.Provider != "" {
 		vector = storage.NoopVectorStore{}
 	}
-	pipeline := storage.NewPipeline(relational, vector)
+
+	var media storage.MediaStore
+	mediaEnabled := false
+	if cfg.Media.Enabled {
+		if relational == nil {
+			return nil, errors.New("media storage requires sql database configuration")
+		}
+		store, err := storage.NewFileMediaStore(cfg.Media.Directory)
+		if err != nil {
+			return nil, fmt.Errorf("media store: %w", err)
+		}
+		media = store
+		mediaEnabled = true
+	}
+
+	pipeline := storage.NewPipeline(relational, vector, media)
 
 	footprint := NewFootprint(cfg.Crawl.Footprint.MaxEntries, cfg.Crawl.Footprint.TTL.Duration, cfg.Crawl.Footprint.Enabled)
 	limiter := NewDomainLimiter(cfg.Crawl.PerDomainDelay.Duration, RateLimiterSettings{
@@ -143,6 +171,16 @@ func NewEngine(cfg config.Config) (*Engine, error) {
 			continue
 		}
 		allowedTypes[ct] = struct{}{}
+	}
+	imageTypes := make(map[string]struct{}, len(cfg.Media.AllowedContentTypes))
+	if mediaEnabled {
+		for _, ct := range cfg.Media.AllowedContentTypes {
+			ct = strings.TrimSpace(strings.ToLower(ct))
+			if ct == "" {
+				continue
+			}
+			imageTypes[ct] = struct{}{}
+		}
 	}
 
 	include, err := compilePatterns(cfg.Crawl.Discovery.IncludePatterns)
@@ -179,6 +217,12 @@ func NewEngine(cfg config.Config) (*Engine, error) {
 		respectMetaRobots:   cfg.Crawl.RespectMetaRobots,
 		respectNofollow:     cfg.Crawl.Discovery.RespectNofollow,
 		minContentLength:    cfg.Crawl.Discovery.MinContentLength,
+		mediaEnabled:        mediaEnabled,
+		imageClient:         httpFetcher.Client(),
+		imageAllowedTypes:   imageTypes,
+		maxImagesPerPage:    cfg.Media.MaxPerPage,
+		maxImageBytes:       cfg.Media.MaxSizeBytes,
+		imageAcceptLang:     cfg.Crawl.Headers["Accept-Language"],
 	}, nil
 }
 
@@ -374,11 +418,21 @@ func (e *Engine) handleRequest(ctx context.Context, req types.CrawlRequest) {
 		baseURL = page.URL
 	}
 
+	var images []types.ImageAsset
+	if e.mediaEnabled && doc != nil && baseURL != nil && e.maxImagesPerPage != 0 {
+		images = e.collectImages(ctx, doc, baseURL)
+		if len(images) > 0 {
+			metadata["image_count"] = strconv.Itoa(len(images))
+			logger.Debug("images captured", "count", len(images))
+		}
+	}
+
 	var links []*url.URL
 	if followLinks && doc != nil && baseURL != nil {
 		links = e.extractLinks(doc, baseURL)
 	}
 	result.Links = links
+	result.Images = images
 
 	shouldPersist := true
 	if e.respectMetaRobots && directives.Noindex {
@@ -517,6 +571,175 @@ func (e *Engine) extractLinks(doc *goquery.Document, base *url.URL) []*url.URL {
 	})
 
 	return links
+}
+
+func (e *Engine) collectImages(ctx context.Context, doc *goquery.Document, base *url.URL) []types.ImageAsset {
+	if doc == nil || base == nil || e.imageClient == nil {
+		return nil
+	}
+	if e.maxImagesPerPage == 0 {
+		return nil
+	}
+	max := e.maxImagesPerPage
+	assets := make([]types.ImageAsset, 0, max)
+	seen := make(map[string]struct{})
+
+	doc.Find("img[src]").EachWithBreak(func(_ int, s *goquery.Selection) bool {
+		if max > 0 && len(assets) >= max {
+			return false
+		}
+		if ctx != nil && ctx.Err() != nil {
+			return false
+		}
+		src, ok := s.Attr("src")
+		if !ok {
+			return true
+		}
+		src = strings.TrimSpace(src)
+		if src == "" {
+			return true
+		}
+		lower := strings.ToLower(src)
+		if strings.HasPrefix(lower, "data:") {
+			return true
+		}
+		target, err := base.Parse(src)
+		if err != nil || target == nil {
+			return true
+		}
+		if scheme := strings.ToLower(target.Scheme); scheme != "http" && scheme != "https" {
+			return true
+		}
+		target.Fragment = ""
+		resolved := target.String()
+		if _, dup := seen[resolved]; dup {
+			return true
+		}
+		seen[resolved] = struct{}{}
+
+		alt, _ := s.Attr("alt")
+		asset, err := e.fetchImageAsset(ctx, target, alt)
+		if err != nil {
+			e.logger.Debug("image fetch failed", "image", resolved, "error", err)
+			return true
+		}
+		if asset != nil {
+			assets = append(assets, *asset)
+		}
+		return true
+	})
+
+	return assets
+}
+
+func (e *Engine) fetchImageAsset(ctx context.Context, target *url.URL, alt string) (*types.ImageAsset, error) {
+	if target == nil || e.imageClient == nil {
+		return nil, nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("build image request: %w", err)
+	}
+	req.Header.Set("User-Agent", e.cfg.Crawl.UserAgent)
+	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+	if lang := strings.TrimSpace(e.imageAcceptLang); lang != "" {
+		req.Header.Set("Accept-Language", lang)
+	}
+
+	resp, err := e.imageClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch image: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("image status %d", resp.StatusCode)
+	}
+
+	contentType := normaliseContentType(resp.Header.Get("Content-Type"))
+	if contentType == "" {
+		contentType = inferImageContentType(target)
+	}
+
+	if contentType != "" && !e.isAllowedImageType(contentType) {
+		return nil, nil
+	}
+
+	maxBytes := e.maxImageBytes
+	if maxBytes <= 0 {
+		maxBytes = 2 * 1024 * 1024
+	}
+	if resp.ContentLength > 0 && maxBytes > 0 && resp.ContentLength > maxBytes {
+		return nil, fmt.Errorf("image exceeds max size (%d > %d)", resp.ContentLength, maxBytes)
+	}
+
+	limited := io.LimitReader(resp.Body, maxBytes+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, fmt.Errorf("read image: %w", err)
+	}
+	if maxBytes > 0 && int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("image exceeds max size (%d > %d)", len(data), maxBytes)
+	}
+
+	if contentType == "" {
+		contentType = normaliseContentType(http.DetectContentType(data))
+	}
+	if !e.isAllowedImageType(contentType) {
+		return nil, nil
+	}
+
+	width, height := 0, 0
+	if cfg, _, err := image.DecodeConfig(bytes.NewReader(data)); err == nil {
+		width = cfg.Width
+		height = cfg.Height
+	}
+
+	asset := &types.ImageAsset{
+		SourceURL:   target.String(),
+		AltText:     strings.TrimSpace(alt),
+		ContentType: contentType,
+		Data:        data,
+		SizeBytes:   int64(len(data)),
+		Width:       width,
+		Height:      height,
+	}
+	return asset, nil
+}
+
+func (e *Engine) isAllowedImageType(ct string) bool {
+	if len(e.imageAllowedTypes) == 0 {
+		return true
+	}
+	norm := normaliseContentType(ct)
+	if norm == "" {
+		return false
+	}
+	_, ok := e.imageAllowedTypes[norm]
+	return ok
+}
+
+func inferImageContentType(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	if ext := strings.ToLower(path.Ext(u.Path)); ext != "" {
+		switch ext {
+		case ".jpg", ".jpeg":
+			return "image/jpeg"
+		case ".png":
+			return "image/png"
+		case ".gif":
+			return "image/gif"
+		case ".webp":
+			return "image/webp"
+		case ".bmp":
+			return "image/bmp"
+		case ".svg":
+			return "image/svg+xml"
+		}
+	}
+	return ""
 }
 
 func (e *Engine) acceptLink(base, target *url.URL) bool {
