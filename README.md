@@ -36,6 +36,10 @@ Each module is documented inline. Extend the configuration to suit deployment en
 ## Running
 
 ```bash
+cp run configs/example.yaml configs/config.yaml
+```
+
+```bash
 go run ./cmd/newscrawler --config configs/example.yaml
 ```
 

@@ -13,7 +13,7 @@ import (
 )
 
 func main() {
-	cfgPath := flag.String("config", "configs/example.yaml", "Path to crawler configuration file")
+	cfgPath := flag.String("config", "configs/config.yaml", "Path to crawler configuration file")
 	flag.Parse()
 
 	cfg, err := config.Load(*cfgPath)
