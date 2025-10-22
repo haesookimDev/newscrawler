@@ -23,6 +23,7 @@ type Config struct {
 	Rendering  RenderingConfig  `yaml:"rendering"`
 	Logging    LoggingConfig    `yaml:"logging"`
 	Media      MediaConfig      `yaml:"media"`
+	Job        JobConfig        `yaml:"job"`
 }
 
 // SQLConfig describes a relational database connection used for persistence.
@@ -82,6 +83,7 @@ type CrawlConfig struct {
 type SeedConfig struct {
 	URL      string `yaml:"url"`
 	MaxDepth int    `yaml:"max_depth"`
+	Label    string `yaml:"label"`
 }
 
 // RateLimitConfig applies a token bucket per domain.
@@ -142,6 +144,15 @@ type MediaConfig struct {
 	MaxPerPage          int      `yaml:"max_per_page"`
 	MaxSizeBytes        int64    `yaml:"max_size_bytes"`
 	AllowedContentTypes []string `yaml:"allowed_content_types"`
+}
+
+// JobConfig identifies the scraper/run context provided by the orchestrator.
+type JobConfig struct {
+	ScraperID        string            `yaml:"scraper_id"`
+	RunID            string            `yaml:"run_id"`
+	TenantID         string            `yaml:"tenant_id"`
+	DefaultSeedLabel string            `yaml:"default_seed_label"`
+	Metadata         map[string]string `yaml:"metadata"`
 }
 
 // LoggingConfig selects log verbosity and format.
@@ -227,6 +238,9 @@ func Default() Config {
 				"image/webp",
 				"image/gif",
 			},
+		},
+		Job: JobConfig{
+			Metadata: make(map[string]string),
 		},
 	}
 }
@@ -333,9 +347,18 @@ func (c Config) Validate() error {
 func (c *Config) normalise() {
 	for i := range c.Crawl.Seeds {
 		c.Crawl.Seeds[i].URL = strings.TrimSpace(c.Crawl.Seeds[i].URL)
+		c.Crawl.Seeds[i].Label = strings.TrimSpace(c.Crawl.Seeds[i].Label)
 	}
 	c.Crawl.UserAgent = strings.TrimSpace(c.Crawl.UserAgent)
 	c.Robots.UserAgent = strings.TrimSpace(c.Robots.UserAgent)
+
+	c.Job.ScraperID = strings.TrimSpace(c.Job.ScraperID)
+	c.Job.RunID = strings.TrimSpace(c.Job.RunID)
+	c.Job.TenantID = strings.TrimSpace(c.Job.TenantID)
+	c.Job.DefaultSeedLabel = strings.TrimSpace(c.Job.DefaultSeedLabel)
+	if c.Job.Metadata == nil {
+		c.Job.Metadata = make(map[string]string)
+	}
 
 	// Ensure overrides are de-duplicated and normalised to lower case.
 	if len(c.Robots.Overrides) > 0 {

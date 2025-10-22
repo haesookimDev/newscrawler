@@ -28,6 +28,7 @@ crawl:
   seeds:
     - url: https://www.example.com/
       max_depth: 3
+      label: example-root
   max_depth: 3
   max_pages: 1000
   user_agent: newscrawler-bot/1.0
@@ -102,3 +103,10 @@ media:
     - image/png
     - image/webp
     - image/gif
+
+job:
+  scraper_id: ""
+  run_id: ""
+  tenant_id: ""
+  default_seed_label: ""
+  metadata: {}

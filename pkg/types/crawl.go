@@ -13,6 +13,9 @@ type CrawlRequest struct {
 	Parent     *url.URL
 	Render     bool
 	SeedLabel  string
+	ScraperID  string
+	RunID      string
+	TenantID   string
 	MaxDepth   int
 	EnqueuedAt time.Time
 }

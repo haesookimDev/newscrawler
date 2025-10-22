@@ -46,6 +46,11 @@ type Engine struct {
 	limiter   *DomainLimiter
 	footprint *Footprint
 
+	scraperID   string
+	runID       string
+	tenantID    string
+	jobMetadata map[string]string
+
 	logger *slog.Logger
 
 	allowed             map[string]struct{}
@@ -197,6 +202,15 @@ func NewEngine(cfg config.Config) (*Engine, error) {
 		maxPages = math.MaxInt64
 	}
 
+	jobMeta := make(map[string]string, len(cfg.Job.Metadata))
+	for k, v := range cfg.Job.Metadata {
+		key := strings.TrimSpace(k)
+		if key == "" {
+			continue
+		}
+		jobMeta[key] = strings.TrimSpace(v)
+	}
+
 	return &Engine{
 		cfg:                 cfg,
 		fetcher:             composite,
@@ -223,6 +237,10 @@ func NewEngine(cfg config.Config) (*Engine, error) {
 		maxImagesPerPage:    cfg.Media.MaxPerPage,
 		maxImageBytes:       cfg.Media.MaxSizeBytes,
 		imageAcceptLang:     cfg.Crawl.Headers["Accept-Language"],
+		scraperID:           cfg.Job.ScraperID,
+		runID:               cfg.Job.RunID,
+		tenantID:            cfg.Job.TenantID,
+		jobMetadata:         jobMeta,
 	}, nil
 }
 
@@ -352,11 +370,29 @@ func (e *Engine) handleRequest(ctx context.Context, req types.CrawlRequest) {
 		"content_length": strconv.Itoa(len(page.Body)),
 		"status_code":    strconv.Itoa(page.StatusCode),
 	}
+	if req.ScraperID != "" {
+		metadata["scraper_id"] = req.ScraperID
+	}
+	if req.RunID != "" {
+		metadata["run_id"] = req.RunID
+	}
+	if req.SeedLabel != "" {
+		metadata["seed_label"] = req.SeedLabel
+	}
+	if req.TenantID != "" {
+		metadata["tenant_id"] = req.TenantID
+	}
 	if ct := normaliseContentType(page.ContentType); ct != "" {
 		metadata["content_type"] = ct
 	}
 	if page.ResponseLatency > 0 {
 		metadata["response_time_ms"] = strconv.FormatInt(page.ResponseLatency.Milliseconds(), 10)
+	}
+	for k, v := range e.jobMetadata {
+		if _, exists := metadata[k]; exists {
+			continue
+		}
+		metadata[k] = v
 	}
 
 	result := types.CrawlResult{Request: req, Page: page, Metadata: metadata}
@@ -474,6 +510,9 @@ func (e *Engine) handleRequest(ctx context.Context, req types.CrawlRequest) {
 			Parent:    parent,
 			Render:    e.cfg.Rendering.Enabled,
 			SeedLabel: req.SeedLabel,
+			ScraperID: req.ScraperID,
+			RunID:     req.RunID,
+			TenantID:  req.TenantID,
 			MaxDepth:  req.MaxDepth,
 		}
 		e.enqueue(ctx, child)
@@ -809,12 +848,22 @@ func (e *Engine) buildSeedRequests() ([]types.CrawlRequest, error) {
 			depthLimit = seed.MaxDepth
 		}
 
+		label := parsed.Hostname()
+		if seed.Label != "" {
+			label = seed.Label
+		} else if e.cfg.Job.DefaultSeedLabel != "" {
+			label = e.cfg.Job.DefaultSeedLabel
+		}
+
 		seeds = append(seeds, types.CrawlRequest{
 			URL:       parsed,
 			Depth:     0,
 			Parent:    nil,
 			Render:    e.cfg.Rendering.Enabled,
-			SeedLabel: parsed.Hostname(),
+			SeedLabel: label,
+			ScraperID: e.scraperID,
+			RunID:     e.runID,
+			TenantID:  e.tenantID,
 			MaxDepth:  depthLimit,
 		})
 	}

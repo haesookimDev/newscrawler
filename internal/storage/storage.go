@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -25,6 +26,10 @@ type Document struct {
 	HTML        []byte
 	CleanHTML   []byte
 	Metadata    map[string]string
+	ScraperID   string
+	RunID       string
+	TenantID    string
+	SeedLabel   string
 }
 
 // ImageRecord tracks stored image metadata for persistence.
@@ -103,6 +108,10 @@ func (p *Pipeline) Persist(ctx context.Context, result types.CrawlResult) error 
 		HTML:        result.Page.Body,
 		CleanHTML:   result.Preprocessed,
 		Metadata:    result.Metadata,
+		ScraperID:   result.Request.ScraperID,
+		RunID:       result.Request.RunID,
+		TenantID:    result.Request.TenantID,
+		SeedLabel:   result.Request.SeedLabel,
 	}
 
 	if p.relational != nil {
@@ -276,16 +285,30 @@ func (s *SQLWriter) SaveImages(ctx context.Context, images []ImageRecord) error 
 }
 
 func (s *SQLWriter) upsertPage(ctx context.Context, doc Document) error {
+	var metadataJSON any
+	if len(doc.Metadata) > 0 {
+		encoded, err := json.Marshal(doc.Metadata)
+		if err != nil {
+			return fmt.Errorf("marshal metadata: %w", err)
+		}
+		metadataJSON = string(encoded)
+	}
+
 	query := `
-        INSERT INTO pages (url, final_url, depth, retrieved_at, status_code, raw_html, clean_html)
-        VALUES ($1,$2,$3,$4,$5,$6,$7)
+        INSERT INTO pages (url, final_url, depth, retrieved_at, status_code, raw_html, clean_html, metadata, scraper_id, run_id, tenant_id, seed_label)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
         ON CONFLICT (url) DO UPDATE SET
             final_url = EXCLUDED.final_url,
             depth = EXCLUDED.depth,
             retrieved_at = EXCLUDED.retrieved_at,
             status_code = EXCLUDED.status_code,
             raw_html = EXCLUDED.raw_html,
-            clean_html = EXCLUDED.clean_html
+            clean_html = EXCLUDED.clean_html,
+            metadata = EXCLUDED.metadata,
+            scraper_id = EXCLUDED.scraper_id,
+            run_id = EXCLUDED.run_id,
+            tenant_id = EXCLUDED.tenant_id,
+            seed_label = EXCLUDED.seed_label
     `
 	if _, err := s.db.ExecContext(ctx, query,
 		doc.URL,
@@ -295,6 +318,11 @@ func (s *SQLWriter) upsertPage(ctx context.Context, doc Document) error {
 		doc.StatusCode,
 		doc.HTML,
 		doc.CleanHTML,
+		metadataJSON,
+		nullIfEmpty(doc.ScraperID),
+		nullIfEmpty(doc.RunID),
+		nullIfEmpty(doc.TenantID),
+		nullIfEmpty(doc.SeedLabel),
 	); err != nil {
 		return err
 	}
@@ -315,6 +343,13 @@ type NoopVectorStore struct{}
 // UpsertEmbedding satisfies the VectorStore interface without persisting data.
 func (NoopVectorStore) UpsertEmbedding(ctx context.Context, doc Document) error {
 	return nil
+}
+
+func nullIfEmpty(value string) any {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
 }
 
 func shouldAttemptCreateDatabase(driver string, err error) bool {
@@ -383,6 +418,12 @@ func (s *SQLWriter) ensureSchema(ctx context.Context) error {
 		    clean_html BYTEA
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_pages_retrieved_at ON pages (retrieved_at DESC)`,
+		`ALTER TABLE pages ADD COLUMN IF NOT EXISTS metadata JSONB`,
+		`ALTER TABLE pages ADD COLUMN IF NOT EXISTS scraper_id TEXT`,
+		`ALTER TABLE pages ADD COLUMN IF NOT EXISTS run_id TEXT`,
+		`ALTER TABLE pages ADD COLUMN IF NOT EXISTS tenant_id TEXT`,
+		`ALTER TABLE pages ADD COLUMN IF NOT EXISTS seed_label TEXT`,
+		`CREATE INDEX IF NOT EXISTS idx_pages_scraper_run ON pages (scraper_id, run_id)`,
 		`CREATE TABLE IF NOT EXISTS images (
 		    page_url TEXT NOT NULL REFERENCES pages(url) ON DELETE CASCADE,
 		    source_url TEXT NOT NULL,
