@@ -20,7 +20,7 @@ paths:
                 $ref: '#/components/schemas/HealthResponse'
         '405':
           $ref: '#/components/responses/MethodNotAllowed'
-  /api/sessions:
+  /api/crawler/sessions:
     get:
       summary: List sessions
       operationId: listSessions
@@ -59,7 +59,7 @@ paths:
           description: Global concurrency limit reached.
         '405':
           $ref: '#/components/responses/MethodNotAllowed'
-  /api/sessions/{session_id}:
+  /api/crawler/sessions/{session_id}:
     parameters:
       - $ref: '#/components/parameters/SessionId'
     get:
@@ -76,7 +76,7 @@ paths:
           $ref: '#/components/responses/NotFound'
         '405':
           $ref: '#/components/responses/MethodNotAllowed'
-  /api/sessions/{session_id}/cancel:
+  /api/crawler/sessions/{session_id}/cancel:
     parameters:
       - $ref: '#/components/parameters/SessionId'
     post:
@@ -91,7 +91,7 @@ paths:
           $ref: '#/components/responses/NotFound'
         '405':
           $ref: '#/components/responses/MethodNotAllowed'
-  /api/sessions/{session_id}/events:
+  /api/crawler/sessions/{session_id}/events:
     parameters:
       - $ref: '#/components/parameters/SessionId'
     get:

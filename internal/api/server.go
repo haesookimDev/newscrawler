@@ -33,8 +33,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("/health", s.handleHealth)
-	s.mux.HandleFunc("/api/sessions", s.handleSessions)
-	s.mux.HandleFunc("/api/sessions/", s.handleSessionByID)
+	s.mux.HandleFunc("/api/crawler/sessions", s.handleSessions)
+	s.mux.HandleFunc("/api/crawler/sessions/", s.handleSessionByID)
 	s.mux.HandleFunc("/openapi.yaml", s.handleOpenAPI)
 	s.mux.HandleFunc("/docs", s.handleDocs)
 }
@@ -62,7 +62,7 @@ func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
-	trimmed := strings.TrimPrefix(r.URL.Path, "/api/sessions/")
+	trimmed := strings.TrimPrefix(r.URL.Path, "/api/crawler/sessions/")
 	if trimmed == "" {
 		http.NotFound(w, r)
 		return
