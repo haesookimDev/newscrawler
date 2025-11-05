@@ -51,3 +51,72 @@ go build ./cmd/newscrawler
 - The crawler observes `robots.txt` unless a host is listed under `robots.overrides`.
 - Worker concurrency, queue size, and per-domain delay protect against deadlocks and throttling.
 - Run `go mod tidy` before building to fetch third-party modules (`chromedp`, `goquery`, `robotstxt`).
+
+## Recent Enhancements
+
+- HTML post-processor now extracts both plain text (`extracted_text`) and Markdown (`markdown`) while preserving table/list structure. These are stored with the cleaned HTML for downstream indexing.
+- Storage layer tracks content fingerprints and marks rows that need re-indexing when the cleaned payload changes.
+- Session-aware crawler engine emits structured progress events and supports multiple parallel runs keyed by seed host.
+- REST API (`cmd/api`) allows external control: create/cancel sessions, stream Server-Sent Events, and retrieve configuration snapshots.
+- Embedded OpenAPI 3.1 spec (`/openapi.yaml`) and Swagger UI (`/docs`) document all endpoints.
+
+## API Server
+
+Start the HTTP control plane with:
+
+```bash
+GOCACHE=$(pwd)/.gocache go run ./cmd/api \
+  --config configs/config.yaml \
+  --addr 0.0.0.0:9010
+```
+
+- Override maximum concurrent sessions via `--max-concurrency` or `CRAWLER_MAX_CONCURRENCY`.
+- Health check: `GET /health`
+- OpenAPI spec: `GET /openapi.yaml`
+- Interactive docs: `GET /docs`
+
+### Launching a Crawl via API
+
+```bash
+curl -X POST http://localhost:9010/api/sessions \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "seed_url": "https://example.com",
+        "depth": 2,
+        "user_agent": "crawler-bot/1.0",
+        "allowed_domains": ["example.com"],
+        "remove_ads": true,
+        "remove_scripts": true,
+        "remove_styles": false,
+        "trim_whitespace": true,
+        "robots": { "respect": true },
+        "media": { "enabled": false },
+        "vector_db": {
+          "provider": "qdrant",
+          "endpoint": "http://qdrant:6333",
+          "index": "news-pages",
+          "namespace": "default",
+          "dimension": 1024,
+          "embedding_model": "Qwen/Qwen3-Embedding-0.6B",
+          "upsert_batch_size": 64
+        }
+      }'
+```
+
+Monitor progress with Server-Sent Events:
+
+```bash
+curl http://localhost:9010/api/sessions/{session_id}/events
+```
+
+Cancel an active crawl:
+
+```bash
+curl -X POST http://localhost:9010/api/sessions/{session_id}/cancel
+```
+
+### Notes
+
+- `media.enabled` requires a reachable relational database (configured under `db.*`). Disable it if you are running without persistence.
+- The API reuses the provided base configuration; only supplied fields are overridden per session.
+- SSE payloads include processed/queued counts and the most recent URL/domain, enabling live progress indicators.
