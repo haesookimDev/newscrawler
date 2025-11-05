@@ -2,7 +2,9 @@ package storage
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,18 +20,24 @@ import (
 
 // Document captures the essential information extracted from a crawl result.
 type Document struct {
-	URL         string
-	FinalURL    string
-	Depth       int
-	RetrievedAt time.Time
-	StatusCode  int
-	HTML        []byte
-	CleanHTML   []byte
-	Metadata    map[string]string
-	ScraperID   string
-	RunID       string
-	TenantID    string
-	SeedLabel   string
+	URL           string
+	FinalURL      string
+	Depth         int
+	RetrievedAt   time.Time
+	StatusCode    int
+	HTML          []byte
+	CleanHTML     []byte
+	ExtractedText string
+	Markdown      string
+	Metadata      map[string]string
+	ScraperID     string
+	RunID         string
+	TenantID      string
+	SeedLabel     string
+	SessionID     string
+	ContentHash   string
+	NeedsIndex    bool
+	IndexedAt     *time.Time
 }
 
 // ImageRecord tracks stored image metadata for persistence.
@@ -100,18 +108,34 @@ func (p *Pipeline) Persist(ctx context.Context, result types.CrawlResult) error 
 		finalURL = result.Page.FinalURL.String()
 	}
 	doc := Document{
-		URL:         result.Request.URL.String(),
-		FinalURL:    finalURL,
-		Depth:       result.Request.Depth,
-		RetrievedAt: result.Page.FetchedAt,
-		StatusCode:  result.Page.StatusCode,
-		HTML:        result.Page.Body,
-		CleanHTML:   result.Preprocessed,
-		Metadata:    result.Metadata,
-		ScraperID:   result.Request.ScraperID,
-		RunID:       result.Request.RunID,
-		TenantID:    result.Request.TenantID,
-		SeedLabel:   result.Request.SeedLabel,
+		URL:           result.Request.URL.String(),
+		FinalURL:      finalURL,
+		Depth:         result.Request.Depth,
+		RetrievedAt:   result.Page.FetchedAt,
+		StatusCode:    result.Page.StatusCode,
+		HTML:          result.Page.Body,
+		Metadata:      result.Metadata,
+		ScraperID:     result.Request.ScraperID,
+		RunID:         result.Request.RunID,
+		TenantID:      result.Request.TenantID,
+		SeedLabel:     result.Request.SeedLabel,
+		SessionID:     result.Request.SessionID,
+		ContentHash:   "",
+		NeedsIndex:    false,
+		IndexedAt:     nil,
+		CleanHTML:     nil,
+		ExtractedText: "",
+		Markdown:      "",
+	}
+
+	if result.Processed != nil {
+		doc.CleanHTML = result.Processed.CleanHTML
+		doc.ExtractedText = result.Processed.ExtractedText
+		doc.Markdown = result.Processed.Markdown
+		doc.NeedsIndex = true
+		doc.ContentHash = computeContentFingerprint(doc.CleanHTML, doc.ExtractedText, doc.Markdown)
+	} else {
+		doc.ContentHash = computeContentFingerprint(doc.HTML, "", "")
 	}
 
 	if p.relational != nil {
@@ -247,6 +271,22 @@ func (s *SQLWriter) SavePage(ctx context.Context, doc Document) error {
 	return nil
 }
 
+func computeContentFingerprint(cleanHTML []byte, extracted, markdown string) string {
+	hasher := sha256.New()
+	if len(cleanHTML) > 0 {
+		_, _ = hasher.Write(cleanHTML)
+	}
+	_, _ = hasher.Write([]byte{0})
+	if extracted != "" {
+		_, _ = hasher.Write([]byte(extracted))
+	}
+	_, _ = hasher.Write([]byte{0})
+	if markdown != "" {
+		_, _ = hasher.Write([]byte(markdown))
+	}
+	return hex.EncodeToString(hasher.Sum(nil))
+}
+
 // SaveImages persists image metadata for a page.
 func (s *SQLWriter) SaveImages(ctx context.Context, images []ImageRecord) error {
 	if s == nil || s.db == nil {
@@ -295,8 +335,18 @@ func (s *SQLWriter) upsertPage(ctx context.Context, doc Document) error {
 	}
 
 	query := `
-        INSERT INTO pages (url, final_url, depth, retrieved_at, status_code, raw_html, clean_html, metadata, scraper_id, run_id, tenant_id, seed_label)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        INSERT INTO pages (
+            url, final_url, depth, retrieved_at, status_code,
+            raw_html, clean_html, extracted_text, markdown,
+            metadata, scraper_id, run_id, tenant_id, seed_label,
+            session_id, content_hash, needs_index, indexed_at
+        )
+        VALUES (
+            $1,$2,$3,$4,$5,
+            $6,$7,$8,$9,
+            $10,$11,$12,$13,$14,
+            $15,$16,$17,$18
+        )
         ON CONFLICT (url) DO UPDATE SET
             final_url = EXCLUDED.final_url,
             depth = EXCLUDED.depth,
@@ -304,11 +354,23 @@ func (s *SQLWriter) upsertPage(ctx context.Context, doc Document) error {
             status_code = EXCLUDED.status_code,
             raw_html = EXCLUDED.raw_html,
             clean_html = EXCLUDED.clean_html,
+            extracted_text = EXCLUDED.extracted_text,
+            markdown = EXCLUDED.markdown,
             metadata = EXCLUDED.metadata,
             scraper_id = EXCLUDED.scraper_id,
             run_id = EXCLUDED.run_id,
             tenant_id = EXCLUDED.tenant_id,
-            seed_label = EXCLUDED.seed_label
+            seed_label = EXCLUDED.seed_label,
+            session_id = COALESCE(EXCLUDED.session_id, pages.session_id),
+            content_hash = EXCLUDED.content_hash,
+            needs_index = CASE
+                WHEN pages.content_hash IS DISTINCT FROM EXCLUDED.content_hash THEN TRUE
+                ELSE pages.needs_index
+            END,
+            indexed_at = CASE
+                WHEN pages.content_hash IS DISTINCT FROM EXCLUDED.content_hash THEN NULL
+                ELSE pages.indexed_at
+            END
     `
 	if _, err := s.db.ExecContext(ctx, query,
 		doc.URL,
@@ -318,11 +380,17 @@ func (s *SQLWriter) upsertPage(ctx context.Context, doc Document) error {
 		doc.StatusCode,
 		doc.HTML,
 		doc.CleanHTML,
+		nullIfEmpty(doc.ExtractedText),
+		nullIfEmpty(doc.Markdown),
 		metadataJSON,
 		nullIfEmpty(doc.ScraperID),
 		nullIfEmpty(doc.RunID),
 		nullIfEmpty(doc.TenantID),
 		nullIfEmpty(doc.SeedLabel),
+		nullIfEmpty(doc.SessionID),
+		nullIfEmpty(doc.ContentHash),
+		doc.NeedsIndex,
+		timeOrNil(doc.IndexedAt),
 	); err != nil {
 		return err
 	}
@@ -350,6 +418,13 @@ func nullIfEmpty(value string) any {
 		return nil
 	}
 	return value
+}
+
+func timeOrNil(t *time.Time) any {
+	if t == nil || t.IsZero() {
+		return nil
+	}
+	return *t
 }
 
 func shouldAttemptCreateDatabase(driver string, err error) bool {
@@ -415,7 +490,18 @@ func (s *SQLWriter) ensureSchema(ctx context.Context) error {
 		    retrieved_at TIMESTAMPTZ,
 		    status_code INT,
 		    raw_html BYTEA,
-		    clean_html BYTEA
+		    clean_html BYTEA,
+		    extracted_text TEXT,
+		    markdown TEXT,
+		    metadata JSONB,
+		    scraper_id TEXT,
+		    run_id TEXT,
+		    tenant_id TEXT,
+		    seed_label TEXT,
+		    session_id TEXT,
+		    content_hash TEXT,
+		    needs_index BOOLEAN DEFAULT TRUE,
+		    indexed_at TIMESTAMPTZ
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_pages_retrieved_at ON pages (retrieved_at DESC)`,
 		`ALTER TABLE pages ADD COLUMN IF NOT EXISTS metadata JSONB`,
@@ -423,7 +509,15 @@ func (s *SQLWriter) ensureSchema(ctx context.Context) error {
 		`ALTER TABLE pages ADD COLUMN IF NOT EXISTS run_id TEXT`,
 		`ALTER TABLE pages ADD COLUMN IF NOT EXISTS tenant_id TEXT`,
 		`ALTER TABLE pages ADD COLUMN IF NOT EXISTS seed_label TEXT`,
+		`ALTER TABLE pages ADD COLUMN IF NOT EXISTS extracted_text TEXT`,
+		`ALTER TABLE pages ADD COLUMN IF NOT EXISTS markdown TEXT`,
+		`ALTER TABLE pages ADD COLUMN IF NOT EXISTS session_id TEXT`,
+		`ALTER TABLE pages ADD COLUMN IF NOT EXISTS content_hash TEXT`,
+		`ALTER TABLE pages ADD COLUMN IF NOT EXISTS needs_index BOOLEAN DEFAULT TRUE`,
+		`ALTER TABLE pages ADD COLUMN IF NOT EXISTS indexed_at TIMESTAMPTZ`,
+		`CREATE INDEX IF NOT EXISTS idx_pages_session ON pages (session_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_pages_scraper_run ON pages (scraper_id, run_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_pages_session_url ON pages (session_id, url)`,
 		`CREATE TABLE IF NOT EXISTS images (
 		    page_url TEXT NOT NULL REFERENCES pages(url) ON DELETE CASCADE,
 		    source_url TEXT NOT NULL,

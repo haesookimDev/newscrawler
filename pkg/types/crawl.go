@@ -12,6 +12,7 @@ type CrawlRequest struct {
 	Depth      int
 	Parent     *url.URL
 	Render     bool
+	SessionID  string
 	SeedLabel  string
 	ScraperID  string
 	RunID      string
@@ -40,7 +41,7 @@ type CrawlResult struct {
 	Links         []*url.URL
 	Error         error
 	RobotsIgnored bool
-	Preprocessed  []byte
+	Processed     *ProcessedContent
 	Metadata      map[string]string
 	Images        []ImageAsset
 }
@@ -62,4 +63,11 @@ type FootprintState struct {
 	Depth         int
 	FullyExplored bool
 	LastVisited   time.Time
+}
+
+// ProcessedContent bundles post-processed representations of a crawled page.
+type ProcessedContent struct {
+	CleanHTML     []byte
+	ExtractedText string
+	Markdown      string
 }

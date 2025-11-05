@@ -1,0 +1,382 @@
+openapi: 3.1.0
+info:
+  title: News Crawler API
+  version: 0.1.0
+  description: >
+    HTTP control plane for launching, monitoring, and cancelling crawler sessions.
+servers:
+  - url: http://localhost:9010
+paths:
+  /health:
+    get:
+      summary: Health Check
+      operationId: getHealth
+      responses:
+        '200':
+          description: The API server is running.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+  /api/sessions:
+    get:
+      summary: List sessions
+      operationId: listSessions
+      responses:
+        '200':
+          description: Array of session summaries.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SessionSummary'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+    post:
+      summary: Create session
+      operationId: createSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSessionRequest'
+      responses:
+        '201':
+          description: Session created and crawl started.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: A session for the same seed host is already running.
+        '429':
+          description: Global concurrency limit reached.
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+  /api/sessions/{session_id}:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      summary: Get session detail
+      operationId: getSession
+      responses:
+        '200':
+          description: Session detail including config snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+  /api/sessions/{session_id}/cancel:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    post:
+      summary: Cancel session
+      operationId: cancelSession
+      responses:
+        '202':
+          description: Cancellation request accepted.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+  /api/sessions/{session_id}/events:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      summary: Stream session events
+      operationId: streamSessionEvents
+      description: >
+        Server-Sent Event stream with session lifecycle notifications and periodic heartbeats.
+      responses:
+        '200':
+          description: Event stream.
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/SSEPayload'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+components:
+  parameters:
+    SessionId:
+      name: session_id
+      in: path
+      required: true
+      description: Session identifier (seed host).
+      schema:
+        type: string
+  responses:
+    BadRequest:
+      description: The request payload or parameters are invalid.
+    NotFound:
+      description: The requested resource does not exist.
+    MethodNotAllowed:
+      description: HTTP method not supported.
+  schemas:
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: ok
+        timestamp:
+          type: string
+          format: date-time
+      required:
+        - status
+        - timestamp
+    CreateSessionRequest:
+      type: object
+      required:
+        - seed_url
+        - depth
+        - user_agent
+        - allowed_domains
+        - remove_ads
+        - remove_scripts
+        - remove_styles
+        - trim_whitespace
+        - robots
+        - media
+        - vector_db
+      properties:
+        seed_url:
+          type: string
+          format: uri
+        depth:
+          type: integer
+          minimum: 1
+        user_agent:
+          type: string
+        allowed_domains:
+          type: array
+          minItems: 1
+          items:
+            type: string
+        remove_ads:
+          type: boolean
+        remove_scripts:
+          type: boolean
+        remove_styles:
+          type: boolean
+        trim_whitespace:
+          type: boolean
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        max_pages:
+          type: integer
+          minimum: 1
+        proxy_url:
+          type: string
+        rate_limit:
+          $ref: '#/components/schemas/RateLimitRequest'
+        robots:
+          $ref: '#/components/schemas/RobotsRequest'
+        media:
+          $ref: '#/components/schemas/MediaRequest'
+        vector_db:
+          $ref: '#/components/schemas/VectorDBRequest'
+        discovery:
+          $ref: '#/components/schemas/DiscoveryRequest'
+    RateLimitRequest:
+      type: object
+      properties:
+        requests:
+          type: integer
+          minimum: 0
+        window_seconds:
+          type: integer
+          minimum: 0
+    RobotsRequest:
+      type: object
+      required:
+        - respect
+      properties:
+        respect:
+          type: boolean
+    MediaRequest:
+      type: object
+      required:
+        - enabled
+      properties:
+        enabled:
+          type: boolean
+    VectorDBRequest:
+      type: object
+      required:
+        - provider
+        - endpoint
+        - index
+        - namespace
+        - dimension
+        - embedding_model
+      properties:
+        provider:
+          type: string
+          example: qdrant
+        endpoint:
+          type: string
+          format: uri
+        api_key:
+          type: string
+        index:
+          type: string
+        namespace:
+          type: string
+        dimension:
+          type: integer
+          minimum: 1
+        embedding_model:
+          type: string
+        upsert_batch_size:
+          type: integer
+          minimum: 1
+    DiscoveryRequest:
+      type: object
+      properties:
+        follow_external:
+          type: boolean
+        max_links_per_page:
+          type: integer
+          minimum: 1
+        include_patterns:
+          type: array
+          items:
+            type: string
+        exclude_patterns:
+          type: array
+          items:
+            type: string
+    SessionSummary:
+      type: object
+      properties:
+        session_id:
+          type: string
+        run_id:
+          type: string
+        seed_url:
+          type: string
+          format: uri
+        status:
+          type: string
+          enum:
+            - pending
+            - running
+            - cancelling
+            - completed
+            - cancelled
+            - failed
+        processed_pages:
+          type: integer
+          minimum: 0
+        pending_pages:
+          type: integer
+          minimum: 0
+        total_enqueued:
+          type: integer
+          minimum: 0
+        last_url:
+          type: string
+        last_domain:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        message:
+          type: string
+        error:
+          type: string
+      required:
+        - session_id
+        - run_id
+        - seed_url
+        - status
+        - processed_pages
+        - pending_pages
+        - total_enqueued
+        - created_at
+    SessionDetail:
+      type: object
+      properties:
+        session:
+          $ref: '#/components/schemas/SessionSummary'
+        config:
+          type: object
+          description: Effective crawler configuration snapshot.
+          additionalProperties: true
+      required:
+        - session
+        - config
+    ProgressEvent:
+      type: object
+      properties:
+        event:
+          type: string
+        session_id:
+          type: string
+        run_id:
+          type: string
+        url:
+          type: string
+        domain:
+          type: string
+        depth:
+          type: integer
+        processed_pages:
+          type: integer
+        total_enqueued:
+          type: integer
+        pending_pages:
+          type: integer
+        timestamp:
+          type: string
+          format: date-time
+        message:
+          type: string
+        error:
+          type: string
+      required:
+        - event
+        - session_id
+        - run_id
+        - processed_pages
+        - total_enqueued
+        - pending_pages
+        - timestamp
+    SSEPayload:
+      type: object
+      description: Wrapper representing a server-sent event payload.
+      properties:
+        type:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        session:
+          $ref: '#/components/schemas/SessionSummary'
+        progress:
+          $ref: '#/components/schemas/ProgressEvent'

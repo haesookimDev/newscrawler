@@ -49,6 +49,7 @@ type Engine struct {
 	scraperID   string
 	runID       string
 	tenantID    string
+	sessionID   string
 	jobMetadata map[string]string
 
 	logger *slog.Logger
@@ -60,8 +61,9 @@ type Engine struct {
 	includePatterns []*regexp.Regexp
 	excludePatterns []*regexp.Regexp
 
-	maxPages int64
-	enqueued atomic.Int64
+	maxPages  int64
+	enqueued  atomic.Int64
+	processed atomic.Int64
 
 	pool *WorkerPool
 	wg   sync.WaitGroup
@@ -79,10 +81,49 @@ type Engine struct {
 	maxImagesPerPage  int
 	maxImageBytes     int64
 	imageAcceptLang   string
+	progressSink      ProgressSink
+}
+
+// ProgressEvent describes crawl lifecycle updates emitted by the engine.
+type ProgressEvent struct {
+	Event          string    `json:"event"`
+	SessionID      string    `json:"session_id"`
+	RunID          string    `json:"run_id"`
+	URL            string    `json:"url,omitempty"`
+	Domain         string    `json:"domain,omitempty"`
+	Depth          int       `json:"depth,omitempty"`
+	ProcessedPages int64     `json:"processed_pages"`
+	TotalEnqueued  int64     `json:"total_enqueued"`
+	PendingPages   int64     `json:"pending_pages"`
+	Timestamp      time.Time `json:"timestamp"`
+	Message        string    `json:"message,omitempty"`
+	Error          string    `json:"error,omitempty"`
+}
+
+// ProgressSink receives progress events during a crawl run.
+type ProgressSink interface {
+	Report(ProgressEvent)
+}
+
+// EngineOption customises engine construction.
+type EngineOption func(*Engine)
+
+// WithSessionID attaches an external session identifier to the engine.
+func WithSessionID(id string) EngineOption {
+	return func(e *Engine) {
+		e.sessionID = strings.TrimSpace(id)
+	}
+}
+
+// WithProgressSink registers a progress sink for crawl lifecycle events.
+func WithProgressSink(sink ProgressSink) EngineOption {
+	return func(e *Engine) {
+		e.progressSink = sink
+	}
 }
 
 // NewEngine builds a crawler engine from configuration.
-func NewEngine(cfg config.Config) (*Engine, error) {
+func NewEngine(cfg config.Config, opts ...EngineOption) (*Engine, error) {
 	logger, err := buildLogger(cfg.Logging)
 	if err != nil {
 		return nil, err
@@ -211,7 +252,7 @@ func NewEngine(cfg config.Config) (*Engine, error) {
 		jobMeta[key] = strings.TrimSpace(v)
 	}
 
-	return &Engine{
+	engine := &Engine{
 		cfg:                 cfg,
 		fetcher:             composite,
 		processor:           proc,
@@ -241,7 +282,18 @@ func NewEngine(cfg config.Config) (*Engine, error) {
 		runID:               cfg.Job.RunID,
 		tenantID:            cfg.Job.TenantID,
 		jobMetadata:         jobMeta,
-	}, nil
+		sessionID:           cfg.Job.ScraperID,
+	}
+
+	for _, opt := range opts {
+		if opt != nil {
+			opt(engine)
+		}
+	}
+	if engine.sessionID == "" {
+		engine.sessionID = cfg.Job.ScraperID
+	}
+	return engine, nil
 }
 
 // Run executes the crawl until completion or context cancellation.
@@ -259,6 +311,11 @@ func (e *Engine) Run(ctx context.Context) error {
 		"max_depth", e.cfg.Crawl.MaxDepth,
 		"max_pages", e.maxPages,
 	)
+	e.emitEvent(ProgressEvent{
+		Event:     "run_started",
+		Timestamp: time.Now(),
+		Message:   "crawler run started",
+	})
 	defer e.logger.Info("crawler engine stopped")
 
 	seeds, err := e.buildSeedRequests()
@@ -281,8 +338,24 @@ func (e *Engine) Run(ctx context.Context) error {
 	case <-ctx.Done():
 		e.logger.Warn("context cancelled, shutting down")
 		<-done
-		return ctx.Err()
+		err := ctx.Err()
+		errMsg := ""
+		if err != nil {
+			errMsg = err.Error()
+		}
+		e.emitEvent(ProgressEvent{
+			Event:     "run_cancelled",
+			Timestamp: time.Now(),
+			Message:   "crawler run cancelled",
+			Error:     errMsg,
+		})
+		return err
 	case <-done:
+		e.emitEvent(ProgressEvent{
+			Event:     "run_completed",
+			Timestamp: time.Now(),
+			Message:   "crawler run completed",
+		})
 		return nil
 	}
 }
@@ -305,6 +378,18 @@ func (e *Engine) Close() error {
 }
 
 func (e *Engine) enqueue(ctx context.Context, req types.CrawlRequest) {
+	if req.SessionID == "" {
+		req.SessionID = e.sessionID
+	}
+	if req.ScraperID == "" {
+		req.ScraperID = e.scraperID
+	}
+	if req.RunID == "" {
+		req.RunID = e.runID
+	}
+	if req.TenantID == "" {
+		req.TenantID = e.tenantID
+	}
 	if req.URL == nil {
 		return
 	}
@@ -334,6 +419,66 @@ func (e *Engine) enqueue(ctx context.Context, req types.CrawlRequest) {
 		e.enqueued.Add(-1)
 		e.logger.Error("enqueue failed", "url", req.URL.String(), "error", err)
 	}
+}
+
+func (e *Engine) reportPageProcessed(req types.CrawlRequest) {
+	if e.progressSink == nil {
+		return
+	}
+	urlStr := ""
+	domain := ""
+	if req.URL != nil {
+		urlStr = req.URL.String()
+		domain = strings.ToLower(req.URL.Hostname())
+	}
+	processed := e.processed.Add(1)
+	total := e.enqueued.Load()
+	pending := total - processed
+	if pending < 0 {
+		pending = 0
+	}
+	event := ProgressEvent{
+		Event:          "page_processed",
+		SessionID:      req.SessionID,
+		RunID:          req.RunID,
+		URL:            urlStr,
+		Domain:         domain,
+		Depth:          req.Depth,
+		ProcessedPages: processed,
+		TotalEnqueued:  total,
+		PendingPages:   pending,
+		Timestamp:      time.Now(),
+	}
+	e.emitEvent(event)
+}
+
+func (e *Engine) emitEvent(evt ProgressEvent) {
+	if e.progressSink == nil {
+		return
+	}
+	if evt.SessionID == "" {
+		evt.SessionID = e.sessionID
+	}
+	if evt.RunID == "" {
+		evt.RunID = e.runID
+	}
+	if evt.Timestamp.IsZero() {
+		evt.Timestamp = time.Now()
+	}
+	if evt.TotalEnqueued == 0 {
+		evt.TotalEnqueued = e.enqueued.Load()
+	}
+	if evt.ProcessedPages == 0 {
+		evt.ProcessedPages = e.processed.Load()
+	}
+	if evt.PendingPages == 0 {
+		pending := evt.TotalEnqueued - evt.ProcessedPages
+		if pending < 0 {
+			pending = 0
+		}
+		evt.PendingPages = pending
+	}
+	e.progressSink.Report(evt)
 }
 
 func (e *Engine) handleRequest(ctx context.Context, req types.CrawlRequest) {
@@ -398,11 +543,11 @@ func (e *Engine) handleRequest(ctx context.Context, req types.CrawlRequest) {
 	result := types.CrawlResult{Request: req, Page: page, Metadata: metadata}
 
 	if e.processor != nil {
-		cleaned, err := e.processor.Process(ctx, page)
+		processed, err := e.processor.Process(ctx, page)
 		if err != nil {
 			logger.Debug("processor error", "error", err)
 		} else {
-			result.Preprocessed = cleaned
+			result.Processed = processed
 		}
 	}
 
@@ -490,6 +635,8 @@ func (e *Engine) handleRequest(ctx context.Context, req types.CrawlRequest) {
 		"links", len(links),
 	)
 
+	e.reportPageProcessed(req)
+
 	if req.Depth >= req.MaxDepth {
 		return
 	}
@@ -509,6 +656,7 @@ func (e *Engine) handleRequest(ctx context.Context, req types.CrawlRequest) {
 			Depth:     req.Depth + 1,
 			Parent:    parent,
 			Render:    e.cfg.Rendering.Enabled,
+			SessionID: req.SessionID,
 			SeedLabel: req.SeedLabel,
 			ScraperID: req.ScraperID,
 			RunID:     req.RunID,
@@ -860,6 +1008,7 @@ func (e *Engine) buildSeedRequests() ([]types.CrawlRequest, error) {
 			Depth:     0,
 			Parent:    nil,
 			Render:    e.cfg.Rendering.Enabled,
+			SessionID: e.sessionID,
 			SeedLabel: label,
 			ScraperID: e.scraperID,
 			RunID:     e.runID,
