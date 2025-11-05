@@ -15,7 +15,7 @@ import (
 
 	"github.com/andybalholm/brotli"
 
-	"newscrawler/pkg/types"
+	"xgen-crawler/pkg/types"
 )
 
 // Fetcher retrieves a web page for the crawler.

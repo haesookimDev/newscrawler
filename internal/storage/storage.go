@@ -14,8 +14,8 @@ import (
 
 	pq "github.com/lib/pq"
 
-	"newscrawler/internal/config"
-	"newscrawler/pkg/types"
+	"xgen-crawler/internal/config"
+	"xgen-crawler/pkg/types"
 )
 
 // Document captures the essential information extracted from a crawl result.

@@ -1,4 +1,4 @@
-module newscrawler
+module xgen-crawler
 
 go 1.24.1
 

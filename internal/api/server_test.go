@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"newscrawler/internal/config"
+	"xgen-crawler/internal/config"
 )
 
 func TestServerHandlers(t *testing.T) {

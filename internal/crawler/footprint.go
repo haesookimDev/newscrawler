@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"newscrawler/pkg/types"
+	"xgen-crawler/pkg/types"
 )
 
 // Footprint tracks visited URLs to prevent redundant crawls.

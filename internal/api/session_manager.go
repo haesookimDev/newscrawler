@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"newscrawler/internal/config"
-	"newscrawler/internal/crawler"
+	"xgen-crawler/internal/config"
+	"xgen-crawler/internal/crawler"
 )
 
 var (

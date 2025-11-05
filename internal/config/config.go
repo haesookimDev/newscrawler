@@ -173,7 +173,7 @@ func Default() Config {
 		Crawl: CrawlConfig{
 			MaxDepth:       3,
 			MaxPages:       1000,
-			UserAgent:      "newscrawler-bot/1.0",
+			UserAgent:      "xgen-crawler-bot/1.0",
 			Headers:        map[string]string{},
 			PerDomainDelay: DurationFrom(250 * time.Millisecond),
 			RequestTimeout: DurationFrom(10 * time.Second),
@@ -211,7 +211,7 @@ func Default() Config {
 		Robots: RobotsConfig{
 			Respect:   true,
 			Overrides: []string{},
-			UserAgent: "newscrawler-bot/1.0",
+			UserAgent: "xgen-crawler-bot/1.0",
 			CacheTTL:  DurationFrom(6 * time.Hour),
 		},
 		Rendering: RenderingConfig{

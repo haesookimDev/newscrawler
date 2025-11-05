@@ -1,6 +1,6 @@
 db:
   driver: postgres
-  dsn: postgres://user:passward@localhost:5432/newscrawler?sslmode=disable
+  dsn: postgres://user:passward@localhost:5432/xgen_crawler?sslmode=disable
   max_open_conns: 10
   max_idle_conns: 5
   conn_max_lifetime: 15m
@@ -31,7 +31,7 @@ crawl:
       label: example-root
   max_depth: 3
   max_pages: 1000
-  user_agent: newscrawler-bot/1.0
+  user_agent: xgen-crawler-bot/1.0
   headers:
     Accept-Language: ko-KR,ko;q=0.9,en-US;q=0.8
   proxy_url: ""
@@ -78,7 +78,7 @@ robots:
   respect: true
   overrides:
     - news.example.com
-  user_agent: newscrawler-bot/1.0
+  user_agent: xgen-crawler-bot/1.0
   cache_ttl: 6h
 
 rendering:

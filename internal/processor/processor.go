@@ -9,8 +9,8 @@ import (
 	"github.com/PuerkitoBio/goquery"
 	"golang.org/x/net/html"
 
-	"newscrawler/internal/config"
-	"newscrawler/pkg/types"
+	"xgen-crawler/internal/config"
+	"xgen-crawler/pkg/types"
 )
 
 // Processor defines content post-processing behaviour after fetching.

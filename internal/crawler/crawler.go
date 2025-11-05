@@ -27,12 +27,12 @@ import (
 
 	"github.com/PuerkitoBio/goquery"
 
-	"newscrawler/internal/config"
-	"newscrawler/internal/fetcher"
-	"newscrawler/internal/processor"
-	robotsclient "newscrawler/internal/robots"
-	"newscrawler/internal/storage"
-	"newscrawler/pkg/types"
+	"xgen-crawler/internal/config"
+	"xgen-crawler/internal/fetcher"
+	"xgen-crawler/internal/processor"
+	robotsclient "xgen-crawler/internal/robots"
+	"xgen-crawler/internal/storage"
+	"xgen-crawler/pkg/types"
 )
 
 // Engine orchestrates fetching, processing, and persisting crawl results.

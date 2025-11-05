@@ -9,7 +9,7 @@ import (
 
 	"github.com/chromedp/chromedp"
 
-	"newscrawler/pkg/types"
+	"xgen-crawler/pkg/types"
 )
 
 // RenderOptions configures the JavaScript rendering pipeline.

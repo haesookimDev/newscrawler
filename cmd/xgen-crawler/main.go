@@ -8,8 +8,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"newscrawler/internal/config"
-	"newscrawler/internal/crawler"
+	"xgen-crawler/internal/config"
+	"xgen-crawler/internal/crawler"
 )
 
 func main() {

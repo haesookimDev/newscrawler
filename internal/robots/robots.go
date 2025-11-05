@@ -11,7 +11,7 @@ import (
 
 	"github.com/temoto/robotstxt"
 
-	"newscrawler/internal/config"
+	"xgen-crawler/internal/config"
 )
 
 // Agent evaluates robots.txt rules with caching and domain overrides.

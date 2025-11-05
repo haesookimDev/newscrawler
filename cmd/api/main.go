@@ -11,8 +11,8 @@ import (
 	"syscall"
 	"time"
 
-	"newscrawler/internal/api"
-	"newscrawler/internal/config"
+	"xgen-crawler/internal/api"
+	"xgen-crawler/internal/config"
 )
 
 func main() {

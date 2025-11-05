@@ -3,8 +3,8 @@ package api
 import (
 	"time"
 
-	"newscrawler/internal/config"
-	"newscrawler/internal/crawler"
+	"xgen-crawler/internal/config"
+	"xgen-crawler/internal/crawler"
 )
 
 // CreateSessionRequest captures the payload used to launch a crawler session.

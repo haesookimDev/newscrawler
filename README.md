@@ -10,7 +10,7 @@ This repository contains a modular Go implementation of a high-performance news 
 ## Module Layout
 
 ```
-cmd/newscrawler       Application entry-point and CLI wiring
+cmd/xgen-crawler      Application entry-point and CLI wiring
 internal/config       Configuration loading/validation utilities
 internal/crawler      Crawl coordinator, worker pool, footprint tracking
 internal/fetcher      Fetch strategies (HTTP + optional JS rendering)
@@ -40,12 +40,12 @@ cp run configs/example.yaml configs/config.yaml
 ```
 
 ```bash
-go run ./cmd/newscrawler --config configs/example.yaml
+go run ./cmd/xgen-crawler --config configs/example.yaml
 ```
 
 ```bash
-go build ./cmd/newscrawler
-./newscrawler --config <config-path>
+go build ./cmd/xgen-crawler
+./xgen-crawler --config <config-path>
 ```
 
 - The crawler observes `robots.txt` unless a host is listed under `robots.overrides`.
@@ -120,3 +120,30 @@ curl -X POST http://localhost:9010/api/sessions/{session_id}/cancel
 - `media.enabled` requires a reachable relational database (configured under `db.*`). Disable it if you are running without persistence.
 - The API reuses the provided base configuration; only supplied fields are overridden per session.
 - SSE payloads include processed/queued counts and the most recent URL/domain, enabling live progress indicators.
+
+## Docker
+
+Build the container image locally:
+
+```bash
+docker build -t xgen-crawler-api .
+```
+
+Run with the provided environment defaults (override any value in `.env` as needed):
+
+```bash
+docker run --env-file .env \
+  -p "${PORT:-9010}:9010" \
+  xgen-crawler-api
+```
+
+Mount a custom configuration file if desired:
+
+```bash
+docker run --env-file .env \
+  -v $(pwd)/configs/config.yaml:/app/configs/config.yaml:ro \
+  -p 9010:9010 \
+  xgen-crawler-api
+```
+
+The container invokes `/entrypoint.sh`, which reads `PORT`, `CONFIG_PATH`, and `MAX_CONCURRENCY` to launch the API binary.
