@@ -3,6 +3,7 @@ package storage
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -127,10 +128,7 @@ func (s *QdrantStore) UpsertEmbedding(ctx context.Context, doc Document) error {
 		"metadata":       doc.Metadata,
 	}
 
-	pointID := doc.ContentHash
-	if pointID == "" {
-		pointID = doc.URL
-	}
+	pointID := uuidFromString(doc.ContentHash + doc.URL)
 
 	point := map[string]any{
 		"id":      pointID,
@@ -300,4 +298,18 @@ func (s *QdrantStore) collectionURL(collection string) string {
 
 func (s *QdrantStore) collectionPointsURL(collection string) string {
 	return fmt.Sprintf("%s/collections/%s/points", s.endpoint, url.PathEscape(collection))
+}
+
+func uuidFromString(content string) string {
+	if content == "" {
+		content = fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	sum := sha256.Sum256([]byte(content))
+	b := make([]byte, 16)
+	copy(b, sum[:])
+
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 1
+
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
