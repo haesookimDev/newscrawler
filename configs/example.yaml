@@ -6,9 +6,6 @@ db:
   create_if_missing: true
   auto_migrate: true
 
-vector_db:
-  upsert_batch_size: 64
-
 worker:
   concurrency: 32
   queue_size: 2048
