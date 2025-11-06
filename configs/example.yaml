@@ -1,6 +1,4 @@
 db:
-  driver: postgres
-  dsn: postgres://user:passward@localhost:5432/xgen_crawler?sslmode=disable
   max_open_conns: 10
   max_idle_conns: 5
   conn_max_lifetime: 15m
@@ -9,13 +7,6 @@ db:
   auto_migrate: true
 
 vector_db:
-  provider: pinecone
-  endpoint: https://controller.example.pinecone.io
-  api_key: ""
-  index: news-index
-  namespace: korean-news
-  dimension: 768
-  embedding_model: text-embedding-3-small
   upsert_batch_size: 64
 
 worker:
