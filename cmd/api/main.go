@@ -1,19 +1,20 @@
 package main
 
 import (
-    "context"
-    "flag"
-    "log"
-    "log/slog"
-    "net/http"
-    "os"
-    "os/signal"
-    "strconv"
-    "syscall"
-    "time"
+	"context"
+	"flag"
+	"log"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"syscall"
+	"time"
 
-    "xgen-crawler/internal/api"
-    "xgen-crawler/internal/config"
+	"xgen-crawler/internal/api"
+	"xgen-crawler/internal/config"
+	"xgen-crawler/internal/storage"
 )
 
 func main() {
@@ -32,12 +33,20 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-    logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{AddSource: true}))
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{AddSource: true}))
 
-    logger.Info("starting api server", "addr", *addr, "max_concurrency", maxConcurrency)
+	logger.Info("starting api server", "addr", *addr, "max_concurrency", maxConcurrency)
 
-    manager := api.NewSessionManager(*baseCfg, maxConcurrency, ctx, logger)
-    server := api.NewServer(manager, logger)
+	manager := api.NewSessionManager(*baseCfg, maxConcurrency, ctx, logger)
+
+	pageStore, err := storage.NewSQLWriter(baseCfg.DB)
+	if err != nil {
+		logger.Error("initialise page store failed", "error", err)
+		log.Fatalf("failed to initialise page store: %v", err)
+	}
+	defer pageStore.Close()
+
+	server := api.NewServer(manager, pageStore, logger)
 
 	httpServer := &http.Server{
 		Addr:    *addr,
@@ -49,12 +58,13 @@ func main() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
-			log.Printf("http shutdown error: %v", err)
+			logger.Error("http shutdown error", "error", err)
 		}
 		manager.Shutdown()
+		_ = pageStore.Close()
 	}()
 
-    logger.Info("api server listening", "addr", *addr, "max_concurrency", maxConcurrency)
+	logger.Info("api server listening", "addr", *addr, "max_concurrency", maxConcurrency)
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
 	}

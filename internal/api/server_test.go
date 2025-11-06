@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"io"
 	"log/slog"
 	"net/http"
@@ -9,7 +10,24 @@ import (
 	"testing"
 
 	"xgen-crawler/internal/config"
+	"xgen-crawler/internal/storage"
 )
+
+type fakePageStore struct{}
+
+func (fakePageStore) ListPages(ctx context.Context, sessionID string, params storage.PageListParams) (storage.PageListResult, error) {
+	return storage.PageListResult{
+		SessionID: sessionID,
+		Total:     0,
+		Page:      1,
+		PageSize:  20,
+		Items:     []storage.PageSummary{},
+	}, nil
+}
+
+func (fakePageStore) GetPageByURL(ctx context.Context, sessionID, url string) (storage.PageDetail, error) {
+	return storage.PageDetail{}, sql.ErrNoRows
+}
 
 func TestServerHandlers(t *testing.T) {
 	cfg := config.Default()
@@ -19,7 +37,7 @@ func TestServerHandlers(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	manager := NewSessionManager(cfg, 1, context.Background(), logger)
-	server := NewServer(manager, logger)
+	server := NewServer(manager, fakePageStore{}, logger)
 
 	assertRoute(t, server, http.MethodGet, "/health", http.StatusOK, "application/json")
 	assertRoute(t, server, http.MethodGet, "/openapi.yaml", http.StatusOK, "application/yaml")

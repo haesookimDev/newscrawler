@@ -1,32 +1,44 @@
 package api
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
+
+	"xgen-crawler/internal/storage"
 )
 
 // Server exposes the HTTP API for managing crawler sessions.
+type PageStore interface {
+	ListPages(ctx context.Context, sessionID string, params storage.PageListParams) (storage.PageListResult, error)
+	GetPageByURL(ctx context.Context, sessionID, url string) (storage.PageDetail, error)
+}
+
 type Server struct {
-	manager *SessionManager
-	mux     *http.ServeMux
-	logger  *slog.Logger
+	manager   *SessionManager
+	pageStore PageStore
+	mux       *http.ServeMux
+	logger    *slog.Logger
 }
 
 // NewServer wires handlers onto an HTTP mux.
-func NewServer(manager *SessionManager, logger *slog.Logger) *Server {
+func NewServer(manager *SessionManager, store PageStore, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	s := &Server{
-		manager: manager,
-		mux:     http.NewServeMux(),
-		logger:  logger,
+		manager:   manager,
+		pageStore: store,
+		mux:       http.NewServeMux(),
+		logger:    logger,
 	}
 	s.routes()
 	return s
@@ -110,6 +122,24 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.cancelSession(w, r, sessionID)
+	case "pages":
+		if s.pageStore == nil {
+			http.Error(w, "page store not configured", http.StatusNotImplemented)
+			return
+		}
+		if len(parts) == 2 {
+			if r.Method != http.MethodGet {
+				methodNotAllowed(w, r, http.MethodGet)
+				return
+			}
+			s.listSessionPages(w, r, sessionID)
+			return
+		}
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, r, http.MethodGet)
+			return
+		}
+		s.getPageDetail(w, r, sessionID, parts[2])
 	default:
 		http.NotFound(w, r)
 	}
@@ -241,6 +271,51 @@ func (s *Server) streamSessionEvents(w http.ResponseWriter, r *http.Request, id 
 			return
 		}
 	}
+}
+
+func (s *Server) listSessionPages(w http.ResponseWriter, r *http.Request, sessionID string) {
+	if s.logger != nil {
+		s.logger.Debug("list session pages", "session_id", sessionID)
+	}
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+	search := r.URL.Query().Get("search")
+
+	params := storage.PageListParams{
+		Page:     page,
+		PageSize: pageSize,
+		Search:   search,
+	}
+	res, err := s.pageStore.ListPages(r.Context(), sessionID, params)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Error("list pages failed", "session_id", sessionID, "error", err)
+		}
+		http.Error(w, "failed to list pages", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) getPageDetail(w http.ResponseWriter, r *http.Request, sessionID, pageID string) {
+	url, err := storage.DecodePageID(pageID)
+	if err != nil {
+		http.Error(w, "invalid page id", http.StatusBadRequest)
+		return
+	}
+	detail, err := s.pageStore.GetPageByURL(r.Context(), sessionID, url)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		if s.logger != nil {
+			s.logger.Error("page detail failed", "session_id", sessionID, "page_id", pageID, "error", err)
+		}
+		http.Error(w, "failed to load page", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, detail)
 }
 
 func methodNotAllowed(w http.ResponseWriter, r *http.Request, allowed ...string) {
