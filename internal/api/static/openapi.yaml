@@ -5,7 +5,7 @@ info:
   description: >
     HTTP control plane for launching, monitoring, and cancelling crawler sessions.
 servers:
-  - url: http://localhost:9010
+  - url: http://localhost:8000
 paths:
   /health:
     get:
