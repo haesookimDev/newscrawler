@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strings"
 	"sync"
@@ -30,10 +31,11 @@ type SessionManager struct {
 	maxConcurrency int
 	running        int
 	rootCtx        context.Context
+	logger         *slog.Logger
 }
 
 // NewSessionManager constructs a manager with the provided defaults.
-func NewSessionManager(base config.Config, maxConcurrency int, rootCtx context.Context) *SessionManager {
+func NewSessionManager(base config.Config, maxConcurrency int, rootCtx context.Context, logger *slog.Logger) *SessionManager {
 	if maxConcurrency <= 0 {
 		maxConcurrency = 5
 	}
@@ -45,6 +47,7 @@ func NewSessionManager(base config.Config, maxConcurrency int, rootCtx context.C
 		baseConfig:     deepCopyConfig(base),
 		maxConcurrency: maxConcurrency,
 		rootCtx:        rootCtx,
+		logger:         logger,
 	}
 }
 
@@ -65,6 +68,15 @@ func (m *SessionManager) StartSession(req CreateSessionRequest) (*Session, error
 		return nil, err
 	}
 
+	if m.logger != nil {
+		m.logger.Info("session start requested",
+			"session_id", sessionID,
+			"seed_url", normalizedSeed,
+			"user_id", req.UserID,
+			"user_name", req.UserName,
+			"run_id", runID)
+	}
+
 	m.mu.Lock()
 	session, exists := m.sessions[sessionID]
 	if !exists {
@@ -72,10 +84,20 @@ func (m *SessionManager) StartSession(req CreateSessionRequest) (*Session, error
 		m.sessions[sessionID] = session
 	}
 	if session.isActiveLocked() {
+		if m.logger != nil {
+			m.logger.Warn("session already running",
+				"session_id", sessionID,
+				"run_id", session.runID)
+		}
 		m.mu.Unlock()
 		return nil, ErrSessionRunning
 	}
 	if m.running >= m.maxConcurrency {
+		if m.logger != nil {
+			m.logger.Warn("concurrency limit reached",
+				"limit", m.maxConcurrency,
+				"session_id", sessionID)
+		}
 		m.mu.Unlock()
 		return nil, ErrMaxConcurrency
 	}
@@ -88,7 +110,19 @@ func (m *SessionManager) StartSession(req CreateSessionRequest) (*Session, error
 			m.running--
 		}
 		m.mu.Unlock()
+		if m.logger != nil {
+			m.logger.Error("start run failed",
+				"session_id", sessionID,
+				"run_id", runID,
+				"error", err)
+		}
 		return nil, err
+	}
+	if m.logger != nil {
+		m.logger.Info("session run started",
+			"session_id", sessionID,
+			"run_id", runID,
+			"running", m.currentRunning())
 	}
 	return session, nil
 }
@@ -134,7 +168,15 @@ func (m *SessionManager) CancelSession(id string) error {
 		return fmt.Errorf("session %q not found", id)
 	}
 	if !session.Cancel("cancel requested via API") {
+		if m.logger != nil {
+			m.logger.Warn("cancel rejected",
+				"session_id", id)
+		}
 		return fmt.Errorf("session %q not running", id)
+	}
+	if m.logger != nil {
+		m.logger.Info("cancel requested",
+			"session_id", id)
 	}
 	return nil
 }
@@ -264,6 +306,15 @@ func (m *SessionManager) notifyCompletion() {
 		m.running--
 	}
 	m.mu.Unlock()
+	if m.logger != nil {
+		m.logger.Info("session completed", "running", m.currentRunning())
+	}
+}
+
+func (m *SessionManager) currentRunning() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.running
 }
 
 // Session tracks the lifecycle and state of a crawler engine instance.
@@ -345,6 +396,13 @@ func (s *Session) startRun(parentCtx context.Context, cfg config.Config, seedURL
 	s.mu.Unlock()
 
 	s.broadcast("session_started", nil)
+	if s.manager != nil && s.manager.logger != nil {
+		s.manager.logger.Info("session started",
+			"session_id", s.id,
+			"run_id", runID,
+			"user_id", s.userID,
+			"user_name", s.userName)
+	}
 
 	go func() {
 		err := engine.Run(runCtx)
@@ -372,6 +430,15 @@ func (s *Session) Report(evt crawler.ProgressEvent) {
 
 	copyEvt := evt
 	s.broadcast("progress", &copyEvt)
+
+	if s.manager != nil && s.manager.logger != nil {
+		s.manager.logger.Debug("page processed",
+			"session_id", evt.SessionID,
+			"run_id", evt.RunID,
+			"processed", evt.ProcessedPages,
+			"pending", evt.PendingPages,
+			"url", evt.URL)
+	}
 }
 
 func (s *Session) handleCompletion(err error) {
@@ -404,6 +471,13 @@ func (s *Session) handleCompletion(err error) {
 		eventType = "session_failed"
 	}
 	s.broadcast(eventType, nil)
+	if s.manager != nil && s.manager.logger != nil {
+		s.manager.logger.Info("session finished",
+			"session_id", s.id,
+			"run_id", s.runID,
+			"status", status,
+			"error", errorText)
+	}
 	s.manager.notifyCompletion()
 }
 
@@ -419,6 +493,12 @@ func (s *Session) Cancel(reason string) bool {
 	cancel := s.cancel
 	s.mu.Unlock()
 	s.broadcast("session_cancelling", nil)
+	if s.manager != nil && s.manager.logger != nil {
+		s.manager.logger.Info("session cancelling",
+			"session_id", s.id,
+			"run_id", s.runID,
+			"reason", reason)
+	}
 	cancel()
 	return true
 }

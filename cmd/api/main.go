@@ -1,18 +1,19 @@
 package main
 
 import (
-	"context"
-	"flag"
-	"log"
-	"net/http"
-	"os"
-	"os/signal"
-	"strconv"
-	"syscall"
-	"time"
+    "context"
+    "flag"
+    "log"
+    "log/slog"
+    "net/http"
+    "os"
+    "os/signal"
+    "strconv"
+    "syscall"
+    "time"
 
-	"xgen-crawler/internal/api"
-	"xgen-crawler/internal/config"
+    "xgen-crawler/internal/api"
+    "xgen-crawler/internal/config"
 )
 
 func main() {
@@ -31,8 +32,12 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	manager := api.NewSessionManager(*baseCfg, maxConcurrency, ctx)
-	server := api.NewServer(manager)
+    logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{AddSource: true}))
+
+    logger.Info("starting api server", "addr", *addr, "max_concurrency", maxConcurrency)
+
+    manager := api.NewSessionManager(*baseCfg, maxConcurrency, ctx, logger)
+    server := api.NewServer(manager, logger)
 
 	httpServer := &http.Server{
 		Addr:    *addr,
@@ -49,7 +54,7 @@ func main() {
 		manager.Shutdown()
 	}()
 
-	log.Printf("API server listening on %s (max concurrency %d)", *addr, maxConcurrency)
+    logger.Info("api server listening", "addr", *addr, "max_concurrency", maxConcurrency)
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
 	}

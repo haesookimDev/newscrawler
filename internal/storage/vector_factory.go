@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"log/slog"
 	"os"
 	"strings"
 
@@ -8,7 +9,7 @@ import (
 )
 
 // NewVectorStore selects a vector store implementation based on configuration.
-func NewVectorStore(cfg config.VectorDBConfig) (VectorStore, error) {
+func NewVectorStore(cfg config.VectorDBConfig, logger *slog.Logger) (VectorStore, error) {
 	provider := strings.TrimSpace(strings.ToLower(cfg.Provider))
 	if provider == "" {
 		return nil, nil
@@ -20,7 +21,7 @@ func NewVectorStore(cfg config.VectorDBConfig) (VectorStore, error) {
 		if embedBase == "" {
 			embedBase = "http://embedding-service:8000"
 		}
-		return NewQdrantStore(cfg, embedBase)
+		return NewQdrantStore(cfg, embedBase, logger)
 	default:
 		return NoopVectorStore{}, nil
 	}

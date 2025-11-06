@@ -175,14 +175,14 @@ func NewEngine(cfg config.Config, opts ...EngineOption) (*Engine, error) {
 		closers = append(closers, sqlWriter.Close)
 	}
 
-	var vector storage.VectorStore
-	if cfg.VectorDB.Provider != "" {
-		vectorStore, err := storage.NewVectorStore(cfg.VectorDB)
-		if err != nil {
-			return nil, fmt.Errorf("vector store: %w", err)
-		}
-		vector = vectorStore
-	}
+    var vector storage.VectorStore
+    if cfg.VectorDB.Provider != "" {
+        vectorStore, err := storage.NewVectorStore(cfg.VectorDB, logger)
+        if err != nil {
+            return nil, fmt.Errorf("vector store: %w", err)
+        }
+        vector = vectorStore
+    }
 
 	var media storage.MediaStore
 	mediaEnabled := false

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -14,13 +15,18 @@ import (
 type Server struct {
 	manager *SessionManager
 	mux     *http.ServeMux
+	logger  *slog.Logger
 }
 
 // NewServer wires handlers onto an HTTP mux.
-func NewServer(manager *SessionManager) *Server {
+func NewServer(manager *SessionManager, logger *slog.Logger) *Server {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	s := &Server{
 		manager: manager,
 		mux:     http.NewServeMux(),
+		logger:  logger,
 	}
 	s.routes()
 	return s
@@ -51,6 +57,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessions(w http.ResponseWriter, r *http.Request) {
+	if s.logger != nil {
+		s.logger.Debug("http request", "method", r.Method, "path", r.URL.Path)
+	}
 	switch r.Method {
 	case http.MethodGet:
 		s.listSessions(w, r)
@@ -115,8 +124,19 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 	req.UserID = strings.TrimSpace(r.Header.Get("X-User-ID"))
 	req.UserName = strings.TrimSpace(r.Header.Get("X-User-Name"))
 	if req.UserID == "" || req.UserName == "" {
+		if s.logger != nil {
+			s.logger.Warn("missing user headers",
+				"path", r.URL.Path,
+				"method", r.Method)
+		}
 		http.Error(w, "missing X-User-ID or X-User-Name header", http.StatusBadRequest)
 		return
+	}
+	if s.logger != nil {
+		s.logger.Info("create session",
+			"session_host", req.SeedURL,
+			"user_id", req.UserID,
+			"user_name", req.UserName)
 	}
 	session, err := s.manager.StartSession(req)
 	if err != nil {
@@ -126,19 +146,33 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, ErrMaxConcurrency):
 			http.Error(w, err.Error(), http.StatusTooManyRequests)
 		default:
+			if s.logger != nil {
+				s.logger.Error("create session failed", "error", err)
+			}
 			http.Error(w, err.Error(), http.StatusBadRequest)
 		}
 		return
+	}
+	if s.logger != nil {
+		s.logger.Info("session created",
+			"session_id", session.id,
+			"run_id", session.runID)
 	}
 	writeJSON(w, http.StatusCreated, session.Snapshot())
 }
 
 func (s *Server) listSessions(w http.ResponseWriter, r *http.Request) {
+	if s.logger != nil {
+		s.logger.Debug("list sessions")
+	}
 	summaries := s.manager.ListSessions()
 	writeJSON(w, http.StatusOK, summaries)
 }
 
 func (s *Server) getSession(w http.ResponseWriter, r *http.Request, id string) {
+	if s.logger != nil {
+		s.logger.Debug("get session", "session_id", id)
+	}
 	detail, ok := s.manager.GetSessionDetail(id)
 	if !ok {
 		http.NotFound(w, r)
@@ -148,7 +182,13 @@ func (s *Server) getSession(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 func (s *Server) cancelSession(w http.ResponseWriter, r *http.Request, id string) {
+	if s.logger != nil {
+		s.logger.Info("cancel session request", "session_id", id)
+	}
 	if err := s.manager.CancelSession(id); err != nil {
+		if s.logger != nil {
+			s.logger.Warn("cancel session failed", "session_id", id, "error", err)
+		}
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -160,6 +200,9 @@ func (s *Server) streamSessionEvents(w http.ResponseWriter, r *http.Request, id 
 	if !ok {
 		http.NotFound(w, r)
 		return
+	}
+	if s.logger != nil {
+		s.logger.Info("stream events", "session_id", id)
 	}
 	eventCh, cancel := session.Subscribe()
 	defer cancel()

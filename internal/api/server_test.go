@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -15,8 +17,9 @@ func TestServerHandlers(t *testing.T) {
 		{URL: "https://example.com", MaxDepth: 1},
 	}
 
-	manager := NewSessionManager(cfg, 1, context.Background())
-	server := NewServer(manager)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	manager := NewSessionManager(cfg, 1, context.Background(), logger)
+	server := NewServer(manager, logger)
 
 	assertRoute(t, server, http.MethodGet, "/health", http.StatusOK, "application/json")
 	assertRoute(t, server, http.MethodGet, "/openapi.yaml", http.StatusOK, "application/yaml")

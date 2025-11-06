@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -25,10 +26,11 @@ type QdrantStore struct {
 
 	mu          sync.Mutex
 	collections map[string]int // collection -> vector dimension
+	logger      *slog.Logger
 }
 
 // NewQdrantStore initialises a Qdrant-backed VectorStore.
-func NewQdrantStore(cfg config.VectorDBConfig, embeddingBase string) (*QdrantStore, error) {
+func NewQdrantStore(cfg config.VectorDBConfig, embeddingBase string, logger *slog.Logger) (*QdrantStore, error) {
 	endpoint := strings.TrimSpace(cfg.Endpoint)
 	if endpoint == "" {
 		return nil, fmt.Errorf("qdrant endpoint not configured")
@@ -44,12 +46,17 @@ func NewQdrantStore(cfg config.VectorDBConfig, embeddingBase string) (*QdrantSto
 		Timeout: 15 * time.Second,
 	}
 
+	if logger == nil {
+		logger = slog.Default()
+	}
+
 	return &QdrantStore{
 		endpoint:     endpoint,
 		apiKey:       strings.TrimSpace(cfg.APIKey),
 		embeddingURL: embeddingBase,
 		httpClient:   client,
 		collections:  make(map[string]int),
+		logger:       logger,
 	}, nil
 }
 
@@ -91,6 +98,10 @@ func (s *QdrantStore) UpsertEmbedding(ctx context.Context, doc Document) error {
 	if doc.UserID == "" || doc.UserName == "" {
 		return fmt.Errorf("missing user identity in document metadata")
 	}
+
+	s.logger.Debug("vector upsert started",
+		"session_id", doc.SessionID,
+		"url", doc.URL)
 
 	dimension, err := s.ensureCollection(ctx, doc.SessionID, doc.UserID, doc.UserName)
 	if err != nil {
@@ -150,6 +161,11 @@ func (s *QdrantStore) UpsertEmbedding(ctx context.Context, doc Document) error {
 		msg, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("qdrant upsert failed: status %d body %s", resp.StatusCode, string(msg))
 	}
+	s.logger.Info("vector upsert completed",
+		"session_id", doc.SessionID,
+		"url", doc.URL,
+		"collection", doc.SessionID,
+		"vector_size", len(embedding))
 	return nil
 }
 
@@ -169,6 +185,10 @@ func (s *QdrantStore) ensureCollection(ctx context.Context, collection, userID, 
 	if dimension <= 0 {
 		return 0, fmt.Errorf("embedding service returned invalid dimension %d", dimension)
 	}
+
+	s.logger.Info("ensuring qdrant collection",
+		"collection", collection,
+		"dimension", dimension)
 
 	body := map[string]any{
 		"vectors": map[string]any{
@@ -204,6 +224,7 @@ func (s *QdrantStore) ensureCollection(ctx context.Context, collection, userID, 
 	s.mu.Lock()
 	s.collections[collection] = dimension
 	s.mu.Unlock()
+	s.logger.Debug("collection ready", "collection", collection)
 	return dimension, nil
 }
 
