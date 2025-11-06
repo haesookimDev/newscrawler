@@ -117,6 +117,7 @@ paths:
       summary: List crawled pages
       operationId: listSessionPages
       parameters:
+        - $ref: '#/components/parameters/SessionId'
         - in: query
           name: page
           schema:
@@ -153,6 +154,9 @@ paths:
     get:
       summary: Get page detail
       operationId: getPageDetail
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+        - $ref: '#/components/parameters/PageId'
       responses:
         '200':
           description: Detailed representation of a crawled page.
