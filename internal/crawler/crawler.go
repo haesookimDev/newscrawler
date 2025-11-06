@@ -169,20 +169,25 @@ func NewEngine(cfg config.Config, opts ...EngineOption) (*Engine, error) {
 	if cfg.DB.Driver != "" && cfg.DB.DSN != "" {
 		sqlWriter, err := storage.NewSQLWriter(cfg.DB)
 		if err != nil {
+			logger.Error("failed to initialise sql writer",
+				"dsn", cfg.DB.DSN,
+				"error", err)
 			return nil, err
 		}
+		logger.Info("sql writer initialised",
+			"dsn", cfg.DB.DSN)
 		relational = sqlWriter
 		closers = append(closers, sqlWriter.Close)
 	}
 
-    var vector storage.VectorStore
-    if cfg.VectorDB.Provider != "" {
-        vectorStore, err := storage.NewVectorStore(cfg.VectorDB, logger)
-        if err != nil {
-            return nil, fmt.Errorf("vector store: %w", err)
-        }
-        vector = vectorStore
-    }
+	var vector storage.VectorStore
+	if cfg.VectorDB.Provider != "" {
+		vectorStore, err := storage.NewVectorStore(cfg.VectorDB, logger)
+		if err != nil {
+			return nil, fmt.Errorf("vector store: %w", err)
+		}
+		vector = vectorStore
+	}
 
 	var media storage.MediaStore
 	mediaEnabled := false
