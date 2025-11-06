@@ -132,9 +132,11 @@ func (p *Pipeline) Persist(ctx context.Context, result types.CrawlResult) error 
 
 	if v := strings.TrimSpace(result.Metadata["x_user_id"]); v != "" {
 		doc.UserID = v
+		delete(result.Metadata, "x_user_id")
 	}
 	if v := strings.TrimSpace(result.Metadata["x_user_name"]); v != "" {
 		doc.UserName = v
+		delete(result.Metadata, "x_user_name")
 	}
 
 	if result.Processed != nil {
