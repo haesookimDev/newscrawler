@@ -110,6 +110,62 @@ paths:
           $ref: '#/components/responses/NotFound'
         '405':
           $ref: '#/components/responses/MethodNotAllowed'
+  /api/crawler/sessions/{session_id}/pages:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      summary: List crawled pages
+      operationId: listSessionPages
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+          description: Page number (defaults to 1)
+        - in: query
+          name: page_size
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+          description: Number of items per page (defaults to 20)
+        - in: query
+          name: search
+          schema:
+            type: string
+          description: Full-text match on url/final_url/title
+      responses:
+        '200':
+          description: Paginated pages for the session.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PageListResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+  /api/crawler/sessions/{session_id}/pages/{page_id}:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+      - $ref: '#/components/parameters/PageId'
+    get:
+      summary: Get page detail
+      operationId: getPageDetail
+      responses:
+        '200':
+          description: Detailed representation of a crawled page.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PageDetail'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
 components:
   parameters:
     SessionId:
@@ -117,6 +173,13 @@ components:
       in: path
       required: true
       description: Session identifier (seed host).
+      schema:
+        type: string
+    PageId:
+      name: page_id
+      in: path
+      required: true
+      description: Base64-url encoded identifier for the page.
       schema:
         type: string
   responses:
@@ -367,6 +430,89 @@ components:
         - total_enqueued
         - pending_pages
         - timestamp
+    PageListResponse:
+      type: object
+      properties:
+        session_id:
+          type: string
+        total:
+          type: integer
+        page:
+          type: integer
+        page_size:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/PageSummary'
+      required:
+        - session_id
+        - total
+        - page
+        - page_size
+        - items
+    PageSummary:
+      type: object
+      properties:
+        page_id:
+          type: string
+        vector_id:
+          type: string
+        url:
+          type: string
+        final_url:
+          type: string
+          nullable: true
+        title:
+          type: string
+        content_type:
+          type: string
+        status_code:
+          type: integer
+        depth:
+          type: integer
+        retrieved_at:
+          type: string
+          format: date-time
+        size_bytes:
+          type: integer
+        tags:
+          type: array
+          items:
+            type: string
+        needs_index:
+          type: boolean
+        indexed_at:
+          type: string
+          format: date-time
+          nullable: true
+        content_hash:
+          type: string
+      required:
+        - page_id
+        - vector_id
+        - url
+        - status_code
+        - depth
+        - retrieved_at
+        - content_hash
+    PageDetail:
+      allOf:
+        - $ref: '#/components/schemas/PageSummary'
+        - type: object
+          properties:
+            raw_html:
+              type: string
+            clean_html:
+              type: string
+            extracted_text:
+              type: string
+            markdown:
+              type: string
+            metadata:
+              type: object
+              additionalProperties:
+                type: string
     SSEPayload:
       type: object
       description: Wrapper representing a server-sent event payload.
