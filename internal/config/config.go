@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -258,6 +259,7 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	cfg.normalise()
+	cfg.applyEnvOverrides()
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -272,6 +274,7 @@ func LoadFromReader(r io.Reader) (*Config, error) {
 		return nil, err
 	}
 	cfg.normalise()
+	cfg.applyEnvOverrides()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -414,4 +417,45 @@ func dedupeLower(values []string) []string {
 // Enabled reports whether per-domain rate limiting is active.
 func (r RateLimitConfig) Enabled() bool {
 	return r.Requests > 0 && !r.Window.IsZero()
+}
+
+func (c *Config) applyEnvOverrides() {
+	if c == nil {
+		return
+	}
+	if v := strings.TrimSpace(os.Getenv("XGEN_DB_DRIVER")); v != "" {
+		c.DB.Driver = v
+	}
+	if v := strings.TrimSpace(os.Getenv("XGEN_DB_DSN")); v != "" {
+		c.DB.DSN = v
+	}
+
+	if v := strings.TrimSpace(os.Getenv("XGEN_VECTOR_PROVIDER")); v != "" {
+		c.VectorDB.Provider = v
+	}
+	if v := strings.TrimSpace(os.Getenv("XGEN_VECTOR_ENDPOINT")); v != "" {
+		c.VectorDB.Endpoint = v
+	}
+	if v := os.Getenv("XGEN_VECTOR_API_KEY"); v != "" {
+		c.VectorDB.APIKey = v
+	}
+	if v := strings.TrimSpace(os.Getenv("XGEN_VECTOR_INDEX")); v != "" {
+		c.VectorDB.Index = v
+	}
+	if v := strings.TrimSpace(os.Getenv("XGEN_VECTOR_NAMESPACE")); v != "" {
+		c.VectorDB.Namespace = v
+	}
+	if v := strings.TrimSpace(os.Getenv("XGEN_VECTOR_EMBEDDING_MODEL")); v != "" {
+		c.VectorDB.EmbeddingModel = v
+	}
+	if v := strings.TrimSpace(os.Getenv("XGEN_VECTOR_DIMENSION")); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			c.VectorDB.Dimension = parsed
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("XGEN_VECTOR_UPSERT_BATCH_SIZE")); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			c.VectorDB.UpsertBatchSize = parsed
+		}
+	}
 }

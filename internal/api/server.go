@@ -112,6 +112,12 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
 		return
 	}
+	req.UserID = strings.TrimSpace(r.Header.Get("X-User-ID"))
+	req.UserName = strings.TrimSpace(r.Header.Get("X-User-Name"))
+	if req.UserID == "" || req.UserName == "" {
+		http.Error(w, "missing X-User-ID or X-User-Name header", http.StatusBadRequest)
+		return
+	}
 	session, err := s.manager.StartSession(req)
 	if err != nil {
 		switch {

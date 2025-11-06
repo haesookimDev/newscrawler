@@ -30,8 +30,15 @@ Each module is documented inline. Extend the configuration to suit deployment en
   - Vector database metadata for embedding upserts.
   - Crawl seeds, per-domain throttling, robots overrides, footprint sizing, and crawl politeness controls such as `max_body_bytes`, `allowed_content_types`, canonical/meta-robots respect flags, and `discovery.respect_nofollow`.
   - Preprocessing flags (ad removal selectors, script/style stripping).
-  - Rendering options for headless Chromium via `chromedp` when JavaScript execution is required.
+- Rendering options for headless Chromium via `chromedp` when JavaScript execution is required.
 - Durations use Go's syntax (`500ms`, `15s`, `24h`). Lists such as `allowed_domains` drive host-level filtering.
+
+### Environment Overrides
+
+- Set `XGEN_DB_DRIVER` and `XGEN_DB_DSN` to override the database connection supplied in YAML.
+- Set `XGEN_VECTOR_*` variables (`PROVIDER`, `ENDPOINT`, `API_KEY`, `INDEX`, `NAMESPACE`, `DIMENSION`, `EMBEDDING_MODEL`, `UPSERT_BATCH_SIZE`) to replace vector DB settings at runtime.
+- Set `XGEN_EMBEDDING_BASE_URL` to point at the embedding microservice (defaults to `http://embedding-service:8000`).
+- These overrides are applied after the YAML is loaded, allowing per-environment secrets without modifying config files. See `.env` for examples.
 
 ## Running
 
@@ -59,6 +66,7 @@ go build ./cmd/xgen-crawler
 - Session-aware crawler engine emits structured progress events and supports multiple parallel runs keyed by seed host.
 - REST API (`cmd/api`) allows external control: create/cancel sessions, stream Server-Sent Events, and retrieve configuration snapshots.
 - Embedded OpenAPI 3.1 spec (`/openapi.yaml`) and Swagger UI (`/docs`) document all endpoints.
+- Qdrant vector store integration embeds each page’s Markdown via the embedding microservice and stores points in per-session collections.
 
 ## API Server
 
@@ -120,6 +128,7 @@ curl -X POST http://localhost:9010/api/sessions/{session_id}/cancel
 - `media.enabled` requires a reachable relational database (configured under `db.*`). Disable it if you are running without persistence.
 - The API reuses the provided base configuration; only supplied fields are overridden per session.
 - SSE payloads include processed/queued counts and the most recent URL/domain, enabling live progress indicators.
+- Include `X-User-ID` and `X-User-Name` headers on `POST /api/sessions`; these values are forwarded to the embedding service for authorization and vector-dimension discovery.
 
 ## Docker
 

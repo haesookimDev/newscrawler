@@ -38,6 +38,8 @@ type Document struct {
 	ContentHash   string
 	NeedsIndex    bool
 	IndexedAt     *time.Time
+	UserID        string
+	UserName      string
 }
 
 // ImageRecord tracks stored image metadata for persistence.
@@ -126,6 +128,13 @@ func (p *Pipeline) Persist(ctx context.Context, result types.CrawlResult) error 
 		CleanHTML:     nil,
 		ExtractedText: "",
 		Markdown:      "",
+	}
+
+	if v := strings.TrimSpace(result.Metadata["x_user_id"]); v != "" {
+		doc.UserID = v
+	}
+	if v := strings.TrimSpace(result.Metadata["x_user_name"]); v != "" {
+		doc.UserName = v
 	}
 
 	if result.Processed != nil {

@@ -25,6 +25,9 @@ type CreateSessionRequest struct {
 	Media           MediaRequest      `json:"media"`
 	VectorDB        VectorDBRequest   `json:"vector_db"`
 	DiscoveryBoosts *DiscoveryRequest `json:"discovery,omitempty"`
+
+	UserID   string `json:"-"`
+	UserName string `json:"-"`
 }
 
 // RobotsRequest captures robots.txt preferences.

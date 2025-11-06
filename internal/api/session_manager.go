@@ -68,7 +68,7 @@ func (m *SessionManager) StartSession(req CreateSessionRequest) (*Session, error
 	m.mu.Lock()
 	session, exists := m.sessions[sessionID]
 	if !exists {
-		session = newSession(sessionID, m)
+		session = newSession(sessionID, m, req.UserID, req.UserName)
 		m.sessions[sessionID] = session
 	}
 	if session.isActiveLocked() {
@@ -245,6 +245,12 @@ func (m *SessionManager) buildConfig(req CreateSessionRequest, sessionID, runID,
 	}
 	cfg.Job.Metadata["seed_url"] = seedURL
 	cfg.Job.Metadata["session_id"] = sessionID
+	if req.UserID != "" {
+		cfg.Job.Metadata["x_user_id"] = req.UserID
+	}
+	if req.UserName != "" {
+		cfg.Job.Metadata["x_user_name"] = req.UserName
+	}
 
 	if err := cfg.Validate(); err != nil {
 		return config.Config{}, err
@@ -285,10 +291,12 @@ type Session struct {
 	subscribers map[chan SSEEvent]struct{}
 	subMu       sync.RWMutex
 
-	manager *SessionManager
+	manager  *SessionManager
+	userID   string
+	userName string
 }
 
-func newSession(id string, manager *SessionManager) *Session {
+func newSession(id string, manager *SessionManager, userID, userName string) *Session {
 	return &Session{
 		id:          id,
 		status:      SessionStatusPending,
@@ -296,6 +304,8 @@ func newSession(id string, manager *SessionManager) *Session {
 		subscribers: make(map[chan SSEEvent]struct{}),
 		manager:     manager,
 		config:      deepCopyConfig(manager.baseConfig),
+		userID:      strings.TrimSpace(userID),
+		userName:    strings.TrimSpace(userName),
 	}
 }
 

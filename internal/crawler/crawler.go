@@ -177,7 +177,11 @@ func NewEngine(cfg config.Config, opts ...EngineOption) (*Engine, error) {
 
 	var vector storage.VectorStore
 	if cfg.VectorDB.Provider != "" {
-		vector = storage.NoopVectorStore{}
+		vectorStore, err := storage.NewVectorStore(cfg.VectorDB)
+		if err != nil {
+			return nil, fmt.Errorf("vector store: %w", err)
+		}
+		vector = vectorStore
 	}
 
 	var media storage.MediaStore
