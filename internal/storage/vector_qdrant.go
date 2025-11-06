@@ -127,8 +127,13 @@ func (s *QdrantStore) UpsertEmbedding(ctx context.Context, doc Document) error {
 		"metadata":       doc.Metadata,
 	}
 
+	pointID := doc.ContentHash
+	if pointID == "" {
+		pointID = doc.URL
+	}
+
 	point := map[string]any{
-		"id":      doc.URL,
+		"id":      pointID,
 		"vector":  embedding,
 		"payload": payload,
 	}
