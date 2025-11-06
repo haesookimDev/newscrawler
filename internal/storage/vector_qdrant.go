@@ -142,7 +142,7 @@ func (s *QdrantStore) UpsertEmbedding(ctx context.Context, doc Document) error {
 		return fmt.Errorf("marshal qdrant payload: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.collectionPointsURL(doc.SessionID), bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, s.collectionPointsURL(doc.SessionID), bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("build qdrant request: %w", err)
 	}
