@@ -14,6 +14,7 @@ import (
 
 	"xgen-crawler/internal/api"
 	"xgen-crawler/internal/config"
+	"xgen-crawler/internal/sessionstate"
 	"xgen-crawler/internal/storage"
 )
 
@@ -37,7 +38,15 @@ func main() {
 
 	logger.Info("starting api server", "addr", *addr, "max_concurrency", maxConcurrency)
 
-	manager := api.NewSessionManager(*baseCfg, maxConcurrency, ctx, logger)
+	stateStore, err := sessionstate.NewRedisStoreFromEnv()
+	if err != nil {
+		logger.Error("failed to initialise redis session store", "error", err)
+	}
+	if stateStore != nil {
+		defer stateStore.Close()
+	}
+
+	manager := api.NewSessionManager(*baseCfg, maxConcurrency, ctx, logger, stateStore)
 
 	pageStore, err := storage.NewSQLWriter(baseCfg.DB)
 	if err != nil {

@@ -14,6 +14,7 @@ import (
 
 	"xgen-crawler/internal/config"
 	"xgen-crawler/internal/crawler"
+	"xgen-crawler/internal/sessionstate"
 )
 
 var (
@@ -32,10 +33,11 @@ type SessionManager struct {
 	running        int
 	rootCtx        context.Context
 	logger         *slog.Logger
+	stateStore     sessionstate.Store
 }
 
 // NewSessionManager constructs a manager with the provided defaults.
-func NewSessionManager(base config.Config, maxConcurrency int, rootCtx context.Context, logger *slog.Logger) *SessionManager {
+func NewSessionManager(base config.Config, maxConcurrency int, rootCtx context.Context, logger *slog.Logger, store sessionstate.Store) *SessionManager {
 	if maxConcurrency <= 0 {
 		maxConcurrency = 5
 	}
@@ -48,6 +50,7 @@ func NewSessionManager(base config.Config, maxConcurrency int, rootCtx context.C
 		maxConcurrency: maxConcurrency,
 		rootCtx:        rootCtx,
 		logger:         logger,
+		stateStore:     store,
 	}
 }
 
@@ -60,6 +63,16 @@ func (m *SessionManager) StartSession(req CreateSessionRequest) (*Session, error
 	sessionID := strings.ToLower(parsedSeed.Hostname())
 	if sessionID == "" {
 		return nil, fmt.Errorf("invalid session id derived from seed url %q", req.SeedURL)
+	}
+
+	if m.stateStore != nil {
+		exists, err := m.stateStore.Exists(m.rootCtx, sessionID)
+		if err != nil && m.logger != nil {
+			m.logger.Warn("redis exists check failed", "session_id", sessionID, "error", err)
+		}
+		if err == nil && exists {
+			return nil, ErrSessionRunning
+		}
 	}
 
 	runID := generateRunID()
@@ -124,16 +137,32 @@ func (m *SessionManager) StartSession(req CreateSessionRequest) (*Session, error
 			"run_id", runID,
 			"running", m.currentRunning())
 	}
+	m.persistSnapshot(session)
 	return session, nil
 }
 
 // ListSessions captures current summaries for all sessions.
 func (m *SessionManager) ListSessions() []SessionSummary {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
 	summaries := make([]SessionSummary, 0, len(m.sessions))
-	for _, session := range m.sessions {
+	existing := make(map[string]struct{}, len(m.sessions))
+	for id, session := range m.sessions {
 		summaries = append(summaries, session.Snapshot())
+		existing[id] = struct{}{}
+	}
+	m.mu.RUnlock()
+
+	if m.stateStore != nil {
+		snaps, err := m.stateStore.List(m.rootCtx)
+		if err != nil && m.logger != nil {
+			m.logger.Warn("list redis sessions failed", "error", err)
+		}
+		for _, snap := range snaps {
+			if _, ok := existing[snap.SessionID]; ok {
+				continue
+			}
+			summaries = append(summaries, snapshotToSummary(snap))
+		}
 	}
 	return summaries
 }
@@ -150,9 +179,21 @@ func (m *SessionManager) GetSession(id string) (*Session, bool) {
 // GetSessionDetail captures the latest summary + config snapshot for a session.
 func (m *SessionManager) GetSessionDetail(id string) (SessionDetail, bool) {
 	session, ok := m.GetSession(id)
-	if !ok {
-		return SessionDetail{}, false
-	}
+		if !ok {
+			if m.stateStore != nil {
+				snap, found, err := m.stateStore.Get(m.rootCtx, id)
+				if err != nil && m.logger != nil {
+					m.logger.Warn("redis get session failed", "session_id", id, "error", err)
+				}
+				if err == nil && found {
+					return SessionDetail{
+						Session: snapshotToSummary(snap),
+						Config:  deepCopyConfig(m.baseConfig),
+					}, true
+				}
+			}
+			return SessionDetail{}, false
+		}
 	summary := session.Snapshot()
 	cfg := session.ConfigSnapshot()
 	return SessionDetail{
@@ -317,6 +358,25 @@ func (m *SessionManager) currentRunning() int {
 	return m.running
 }
 
+func (m *SessionManager) persistSnapshot(session *Session) {
+	if m.stateStore == nil || session == nil {
+		return
+	}
+	snap := session.toSnapshot()
+	if err := m.stateStore.Save(m.rootCtx, snap); err != nil && m.logger != nil {
+		m.logger.Warn("persist session snapshot failed", "session_id", session.id, "error", err)
+	}
+}
+
+func (m *SessionManager) removeSnapshot(sessionID string) {
+	if m.stateStore == nil || sessionID == "" {
+		return
+	}
+	if err := m.stateStore.Remove(m.rootCtx, sessionID); err != nil && m.logger != nil {
+		m.logger.Warn("remove session snapshot failed", "session_id", sessionID, "error", err)
+	}
+}
+
 // Session tracks the lifecycle and state of a crawler engine instance.
 type Session struct {
 	id string
@@ -403,6 +463,9 @@ func (s *Session) startRun(parentCtx context.Context, cfg config.Config, seedURL
 			"user_id", s.userID,
 			"user_name", s.userName)
 	}
+	if s.manager != nil {
+		s.manager.persistSnapshot(s)
+	}
 
 	go func() {
 		err := engine.Run(runCtx)
@@ -438,6 +501,9 @@ func (s *Session) Report(evt crawler.ProgressEvent) {
 			"processed", evt.ProcessedPages,
 			"pending", evt.PendingPages,
 			"url", evt.URL)
+	}
+	if s.manager != nil {
+		s.manager.persistSnapshot(s)
 	}
 }
 
@@ -479,6 +545,9 @@ func (s *Session) handleCompletion(err error) {
 			"error", errorText)
 	}
 	s.manager.notifyCompletion()
+	if s.manager != nil {
+		s.manager.removeSnapshot(s.id)
+	}
 }
 
 // Cancel attempts to stop the running engine.
@@ -493,6 +562,9 @@ func (s *Session) Cancel(reason string) bool {
 	cancel := s.cancel
 	s.mu.Unlock()
 	s.broadcast("session_cancelling", nil)
+	if s.manager != nil {
+		s.manager.persistSnapshot(s)
+	}
 	if s.manager != nil && s.manager.logger != nil {
 		s.manager.logger.Info("session cancelling",
 			"session_id", s.id,
@@ -539,6 +611,51 @@ func (s *Session) snapshotLocked() SessionSummary {
 	if s.completedAt != nil {
 		completed := *s.completedAt
 		summary.CompletedAt = &completed
+	}
+	return summary
+}
+
+func (s *Session) toSnapshot() sessionstate.Snapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snap := sessionstate.Snapshot{
+		SessionID:     s.id,
+		RunID:         s.runID,
+		SeedURL:       s.seedURL,
+		Status:        string(s.status),
+		Processed:     s.processed,
+		Pending:       s.pending,
+		TotalEnqueued: s.totalEnqueue,
+		LastURL:       s.lastURL,
+		LastDomain:    s.lastDomain,
+		Message:       s.message,
+		CreatedAt:     s.createdAt,
+		UserID:        s.userID,
+		UserName:      s.userName,
+	}
+	if s.startedAt != nil {
+		snap.StartedAt = *s.startedAt
+	}
+	return snap
+}
+
+func snapshotToSummary(snap sessionstate.Snapshot) SessionSummary {
+	summary := SessionSummary{
+		SessionID:     snap.SessionID,
+		RunID:         snap.RunID,
+		SeedURL:       snap.SeedURL,
+		Status:        SessionStatus(snap.Status),
+		Processed:     snap.Processed,
+		Pending:       snap.Pending,
+		TotalEnqueued: snap.TotalEnqueued,
+		LastURL:       snap.LastURL,
+		LastDomain:    snap.LastDomain,
+		CreatedAt:     snap.CreatedAt,
+		Message:       snap.Message,
+	}
+	if !snap.StartedAt.IsZero() {
+		started := snap.StartedAt
+		summary.StartedAt = &started
 	}
 	return summary
 }

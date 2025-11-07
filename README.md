@@ -38,6 +38,7 @@ Each module is documented inline. Extend the configuration to suit deployment en
 - Set `XGEN_DB_DRIVER` and `XGEN_DB_DSN` to override the database connection supplied in YAML.
 - Set `XGEN_VECTOR_*` variables (`PROVIDER`, `ENDPOINT`, `API_KEY`, `INDEX`, `NAMESPACE`, `DIMENSION`, `EMBEDDING_MODEL`, `UPSERT_BATCH_SIZE`) to replace vector DB settings at runtime.
 - Set `XGEN_EMBEDDING_BASE_URL` to point at the embedding microservice (defaults to `http://embedding-service:8000`).
+- Set `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, `REDIS_PASSWORD` to enable Redis-backed session persistence (optional; when unset, in-memory session tracking is used).
 - These overrides are applied after the YAML is loaded, allowing per-environment secrets without modifying config files. See `.env` for examples.
 
 ## Running

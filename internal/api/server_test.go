@@ -53,7 +53,7 @@ func TestServerHandlers(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	manager := NewSessionManager(cfg, 1, context.Background(), logger)
+	manager := NewSessionManager(cfg, 1, context.Background(), logger, nil)
 	server := NewServer(manager, fakePageStore{}, logger)
 
 	assertRoute(t, server, http.MethodGet, "/health", http.StatusOK, "application/json")
