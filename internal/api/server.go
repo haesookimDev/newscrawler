@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -48,6 +49,11 @@ func NewServer(manager *SessionManager, store PageStore, logger *slog.Logger) *S
 
 // ServeHTTP satisfies the http.Handler interface.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	setCORSHeaders(w)
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	s.mux.ServeHTTP(w, r)
 }
 
@@ -389,6 +395,17 @@ func (s *Server) handlePageSessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func setCORSHeaders(w http.ResponseWriter) {
+	origin := strings.TrimSpace(os.Getenv("CORS_ALLOW_ORIGIN"))
+	if origin == "" {
+		origin = "*"
+	}
+	w.Header().Set("Access-Control-Allow-Origin", origin)
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-User-ID, X-User-Name")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Max-Age", "86400")
 }
 
 func methodNotAllowed(w http.ResponseWriter, r *http.Request, allowed ...string) {
