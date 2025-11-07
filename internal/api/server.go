@@ -410,15 +410,18 @@ func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 
 func resolveOrigin(r *http.Request) string {
 	raw := strings.TrimSpace(os.Getenv("CORS_ALLOW_ORIGIN"))
+	req := strings.TrimSpace(r.Header.Get("Origin"))
+	if req == "" {
+		req = strings.TrimSpace(r.Header.Get("X-Forwarded-Origin"))
+	}
 	if raw == "" {
-		req := strings.TrimSpace(r.Header.Get("Origin"))
 		if req != "" {
 			return req
 		}
 		return "*"
 	}
 	parts := strings.Split(raw, ",")
-	reqOrigin := strings.TrimSpace(r.Header.Get("Origin"))
+	reqOrigin := req
 	var fallback string
 	for _, part := range parts {
 		allowed := strings.TrimSpace(part)
