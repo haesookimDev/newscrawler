@@ -48,7 +48,7 @@ type PageListResult struct {
 // PageDetail extends summary with full content.
 type PageDetail struct {
 	PageSummary
-	RawHTML       string            `json:"raw_html,omitempty"`
+	// RawHTML       string            `json:"raw_html,omitempty"`
 	CleanHTML     string            `json:"clean_html,omitempty"`
 	ExtractedText string            `json:"extracted_text,omitempty"`
 	Markdown      string            `json:"markdown,omitempty"`
@@ -215,7 +215,7 @@ func (s *SQLWriter) GetPageByURL(ctx context.Context, sessionID, url string) (Pa
 			ContentHash: contentHash.String,
 			NeedsIndex:  needsIndex,
 		},
-		RawHTML:       string(rawHTML),
+		// RawHTML:       string(rawHTML),
 		CleanHTML:     string(cleanHTML),
 		ExtractedText: extracted.String,
 		Markdown:      markdown.String,
