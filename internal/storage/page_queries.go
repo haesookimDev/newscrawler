@@ -53,6 +53,22 @@ type GlobalPageListResult struct {
 	Items    []PageSummary `json:"items"`
 }
 
+// SessionPageOverview summarises crawl results per session.
+type SessionPageOverview struct {
+	SessionID     string       `json:"session_id"`
+	PageCount     int64        `json:"page_count"`
+	LastCrawledAt time.Time    `json:"last_crawled_at"`
+	RootPage      *PageSummary `json:"root_page,omitempty"`
+}
+
+// SessionPageOverviewResult wraps paginated session summaries.
+type SessionPageOverviewResult struct {
+	Total    int64                 `json:"total"`
+	Page     int                   `json:"page"`
+	PageSize int                   `json:"page_size"`
+	Items    []SessionPageOverview `json:"items"`
+}
+
 // PageDetail extends summary with full content.
 type PageDetail struct {
 	PageSummary
@@ -360,6 +376,132 @@ func (s *SQLWriter) ListAllPages(ctx context.Context, params PageListParams, ses
 	}
 	if err := rows.Err(); err != nil {
 		return GlobalPageListResult{}, err
+	}
+	result.Items = items
+	return result, nil
+}
+
+// ListSessionPageOverviews aggregates per-session stats and root page metadata.
+func (s *SQLWriter) ListSessionPageOverviews(ctx context.Context, params PageListParams) (SessionPageOverviewResult, error) {
+	if s == nil || s.db == nil {
+		return SessionPageOverviewResult{}, fmt.Errorf("sql store not initialised")
+	}
+	page := params.Page
+	if page <= 0 {
+		page = 1
+	}
+	pageSize := params.PageSize
+	if pageSize <= 0 || pageSize > 200 {
+		pageSize = 20
+	}
+	search := strings.TrimSpace(params.Search)
+
+	result := SessionPageOverviewResult{
+		Page:     page,
+		PageSize: pageSize,
+	}
+
+	var (
+		whereClause string
+		args        []any
+	)
+	if search != "" {
+		whereClause = "WHERE session_id ILIKE $1"
+		args = append(args, "%"+search+"%")
+	}
+
+	totalQuery := fmt.Sprintf("SELECT COUNT(*) FROM (SELECT session_id FROM pages %s GROUP BY session_id) t", whereClause)
+	if err := s.db.QueryRowContext(ctx, totalQuery, args...).Scan(&result.Total); err != nil {
+		return SessionPageOverviewResult{}, fmt.Errorf("count session pages: %w", err)
+	}
+
+	listQuery := fmt.Sprintf(`
+        WITH counts AS (
+            SELECT session_id, COUNT(*) AS page_count, MAX(retrieved_at) AS last_crawled
+            FROM pages
+            %s
+            GROUP BY session_id
+        ),
+        roots AS (
+            SELECT DISTINCT ON (session_id)
+                session_id, url, final_url, depth, retrieved_at, status_code,
+                metadata, content_hash, needs_index, indexed_at
+            FROM pages
+            WHERE depth = 0
+            ORDER BY session_id, retrieved_at DESC
+        )
+        SELECT c.session_id, c.page_count, c.last_crawled,
+               r.url, r.final_url, r.depth, r.retrieved_at AS root_retrieved,
+               r.status_code, r.metadata, r.content_hash, r.needs_index, r.indexed_at
+        FROM counts c
+        LEFT JOIN roots r ON c.session_id = r.session_id
+        ORDER BY c.session_id ASC
+        LIMIT $%d OFFSET $%d
+    `, whereClause, len(args)+1, len(args)+2)
+
+	listArgs := append(args, pageSize, (page-1)*pageSize)
+
+	rows, err := s.db.QueryContext(ctx, listQuery, listArgs...)
+	if err != nil {
+		return SessionPageOverviewResult{}, fmt.Errorf("list session pages: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]SessionPageOverview, 0, pageSize)
+	for rows.Next() {
+		var (
+			sessionID  string
+			pageCount  int64
+			lastCrawled time.Time
+			rootURL    sql.NullString
+			rootFinal  sql.NullString
+			rootDepth  sql.NullInt64
+			rootRetrieved sql.NullTime
+			rootStatus sql.NullInt64
+			rootMetadata []byte
+			rootHash sql.NullString
+			rootNeeds bool
+			rootIndexed sql.NullTime
+		)
+		if err := rows.Scan(&sessionID, &pageCount, &lastCrawled,
+			&rootURL, &rootFinal, &rootDepth, &rootRetrieved,
+			&rootStatus, &rootMetadata, &rootHash, &rootNeeds, &rootIndexed); err != nil {
+			return SessionPageOverviewResult{}, fmt.Errorf("scan session page row: %w", err)
+		}
+		overview := SessionPageOverview{
+			SessionID:     sessionID,
+			PageCount:     pageCount,
+			LastCrawledAt: lastCrawled,
+		}
+		if rootURL.Valid {
+			meta := parseMetadata(rootMetadata)
+			root := PageSummary{
+				SessionID:   sessionID,
+				PageID:      EncodePageID(rootURL.String),
+				VectorID:    GeneratePointID(rootHash.String, rootURL.String),
+				URL:         rootURL.String,
+				FinalURL:    rootFinal.String,
+				Depth:       int(rootDepth.Int64),
+				RetrievedAt: rootRetrieved.Time,
+				StatusCode:  int(rootStatus.Int64),
+				ContentHash: rootHash.String,
+				NeedsIndex:  rootNeeds,
+			}
+			if rootIndexed.Valid {
+				root.IndexedAt = &rootIndexed.Time
+			}
+			root.Title = meta["title"]
+			root.ContentType = meta["content_type"]
+			root.SizeBytes = parseSize(meta["content_length"])
+			if tags := meta["tags"]; tags != "" {
+				root.Tags = splitTags(tags)
+			}
+			overview.RootPage = &root
+		}
+		items = append(items, overview)
+	}
+	if err := rows.Err(); err != nil {
+		return SessionPageOverviewResult{}, err
 	}
 	result.Items = items
 	return result, nil

@@ -20,6 +20,7 @@ import (
 type PageStore interface {
 	ListPages(ctx context.Context, sessionID string, params storage.PageListParams) (storage.PageListResult, error)
 	ListAllPages(ctx context.Context, params storage.PageListParams, sessionID string) (storage.GlobalPageListResult, error)
+	ListSessionPageOverviews(ctx context.Context, params storage.PageListParams) (storage.SessionPageOverviewResult, error)
 	GetPageByURL(ctx context.Context, sessionID, url string) (storage.PageDetail, error)
 }
 
@@ -55,6 +56,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/api/crawler/sessions", s.handleSessions)
 	s.mux.HandleFunc("/api/crawler/sessions/", s.handleSessionByID)
 	s.mux.HandleFunc("/api/crawler/pages", s.handleAllPages)
+	s.mux.HandleFunc("/api/crawler/page-sessions", s.handlePageSessions)
 	s.mux.HandleFunc("/openapi.yaml", s.handleOpenAPI)
 	s.mux.HandleFunc("/docs", s.handleDocs)
 }
@@ -359,6 +361,34 @@ func (s *Server) handleAllPages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) handlePageSessions(w http.ResponseWriter, r *http.Request) {
+	if s.pageStore == nil {
+		http.Error(w, "page store not configured", http.StatusNotImplemented)
+		return
+	}
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, r, http.MethodGet)
+		return
+	}
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+	search := r.URL.Query().Get("search")
+	params := storage.PageListParams{
+		Page:     page,
+		PageSize: pageSize,
+		Search:   search,
+	}
+	result, err := s.pageStore.ListSessionPageOverviews(r.Context(), params)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Error("list session page overviews failed", "error", err)
+		}
+		http.Error(w, "failed to list session pages", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func methodNotAllowed(w http.ResponseWriter, r *http.Request, allowed ...string) {

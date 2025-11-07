@@ -33,6 +33,15 @@ func (fakePageStore) ListAllPages(ctx context.Context, params storage.PageListPa
 	}, nil
 }
 
+func (fakePageStore) ListSessionPageOverviews(ctx context.Context, params storage.PageListParams) (storage.SessionPageOverviewResult, error) {
+	return storage.SessionPageOverviewResult{
+		Total:    0,
+		Page:     1,
+		PageSize: 20,
+		Items:    []storage.SessionPageOverview{},
+	}, nil
+}
+
 func (fakePageStore) GetPageByURL(ctx context.Context, sessionID, url string) (storage.PageDetail, error) {
 	return storage.PageDetail{}, sql.ErrNoRows
 }

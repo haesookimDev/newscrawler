@@ -166,6 +166,39 @@ paths:
         '405':
           $ref: '#/components/responses/MethodNotAllowed'
 
+  /api/crawler/page-sessions:
+    get:
+      summary: Session-level crawl summaries
+      operationId: listSessionPageOverviews
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+          description: Page number (defaults to 1)
+        - in: query
+          name: page_size
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+          description: Number of items per page (defaults to 20)
+        - in: query
+          name: search
+          schema:
+            type: string
+          description: Filter by session_id (ILIKE)
+      responses:
+        '200':
+          description: Aggregated per-session crawl summaries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionPageOverviewResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+
   /api/crawler/pages:
     get:
       summary: List crawled pages (all sessions)
@@ -553,6 +586,40 @@ components:
               type: object
               additionalProperties:
                 type: string
+    SessionPageOverviewResponse:
+      type: object
+      properties:
+        total:
+          type: integer
+        page:
+          type: integer
+        page_size:
+          type: integer
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SessionPageOverview'
+      required:
+        - total
+        - page
+        - page_size
+        - items
+    SessionPageOverview:
+      type: object
+      properties:
+        session_id:
+          type: string
+        page_count:
+          type: integer
+        last_crawled_at:
+          type: string
+          format: date-time
+        root_page:
+          $ref: '#/components/schemas/PageSummary'
+      required:
+        - session_id
+        - page_count
+        - last_crawled_at
     SSEPayload:
       type: object
       description: Wrapper representing a server-sent event payload.
