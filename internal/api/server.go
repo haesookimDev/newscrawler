@@ -398,15 +398,7 @@ func (s *Server) handlePageSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
-	configured := strings.TrimSpace(os.Getenv("CORS_ALLOW_ORIGIN"))
-	origin := configured
-	if origin == "" || origin == "*" {
-		if reqOrigin := strings.TrimSpace(r.Header.Get("Origin")); reqOrigin != "" {
-			origin = reqOrigin
-		} else if origin == "" {
-			origin = "*"
-		}
-	}
+	origin := resolveOrigin(r)
 	w.Header().Set("Access-Control-Allow-Origin", origin)
 	if origin != "*" {
 		w.Header().Set("Access-Control-Allow-Credentials", "true")
@@ -414,6 +406,42 @@ func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-User-ID, X-User-Name")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 	w.Header().Set("Access-Control-Max-Age", "86400")
+}
+
+func resolveOrigin(r *http.Request) string {
+	raw := strings.TrimSpace(os.Getenv("CORS_ALLOW_ORIGIN"))
+	if raw == "" {
+		req := strings.TrimSpace(r.Header.Get("Origin"))
+		if req != "" {
+			return req
+		}
+		return "*"
+	}
+	parts := strings.Split(raw, ",")
+	reqOrigin := strings.TrimSpace(r.Header.Get("Origin"))
+	var fallback string
+	for _, part := range parts {
+		allowed := strings.TrimSpace(part)
+		if allowed == "" {
+			continue
+		}
+		if fallback == "" {
+			fallback = allowed
+		}
+		if allowed == "*" {
+			return "*"
+		}
+		if reqOrigin != "" && strings.EqualFold(allowed, reqOrigin) {
+			return reqOrigin
+		}
+	}
+	if fallback != "" {
+		return fallback
+	}
+	if reqOrigin != "" {
+		return reqOrigin
+	}
+	return "*"
 }
 
 func methodNotAllowed(w http.ResponseWriter, r *http.Request, allowed ...string) {
