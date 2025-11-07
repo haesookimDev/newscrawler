@@ -170,6 +170,45 @@ paths:
           $ref: '#/components/responses/NotFound'
         '405':
           $ref: '#/components/responses/MethodNotAllowed'
+
+  /api/crawler/pages:
+    get:
+      summary: List crawled pages (all sessions)
+      operationId: listAllPages
+      parameters:
+        - in: query
+          name: session_id
+          schema:
+            type: string
+          description: Optional session/host filter
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+          description: Page number (defaults to 1)
+        - in: query
+          name: page_size
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+          description: Number of items per page (defaults to 20)
+        - in: query
+          name: search
+          schema:
+            type: string
+          description: Full-text match on url/final_url/title
+      responses:
+        '200':
+          description: Paginated pages across all sessions.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PageListResponse'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+
 components:
   parameters:
     SessionId:
@@ -532,40 +571,3 @@ components:
           $ref: '#/components/schemas/SessionSummary'
         progress:
           $ref: '#/components/schemas/ProgressEvent'
-  /api/crawler/pages:
-    get:
-      summary: List crawled pages (all sessions)
-      operationId: listAllPages
-      parameters:
-        - in: query
-          name: session_id
-          schema:
-            type: string
-          description: Optional session/host filter
-        - in: query
-          name: page
-          schema:
-            type: integer
-            minimum: 1
-          description: Page number (defaults to 1)
-        - in: query
-          name: page_size
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 200
-          description: Number of items per page (defaults to 20)
-        - in: query
-          name: search
-          schema:
-            type: string
-          description: Full-text match on url/final_url/title
-      responses:
-        '200':
-          description: Paginated pages across all sessions.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/PageListResponse'
-        '405':
-          $ref: '#/components/responses/MethodNotAllowed'
