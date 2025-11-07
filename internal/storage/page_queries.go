@@ -20,6 +20,7 @@ type PageListParams struct {
 
 // PageSummary represents a crawled page in list view.
 type PageSummary struct {
+	SessionID   string     `json:"session_id,omitempty"`
 	PageID      string     `json:"page_id"`
 	VectorID    string     `json:"vector_id"`
 	URL         string     `json:"url"`
@@ -38,11 +39,18 @@ type PageSummary struct {
 
 // PageListResult wraps summaries with pagination metadata.
 type PageListResult struct {
-	SessionID string        `json:"session_id"`
-	Total     int64         `json:"total"`
-	Page      int           `json:"page"`
-	PageSize  int           `json:"page_size"`
-	Items     []PageSummary `json:"items"`
+	Total    int64         `json:"total"`
+	Page     int           `json:"page"`
+	PageSize int           `json:"page_size"`
+	Items    []PageSummary `json:"items"`
+}
+
+// GlobalPageListResult is used when listing pages across all sessions.
+type GlobalPageListResult struct {
+	Total    int64         `json:"total"`
+	Page     int           `json:"page"`
+	PageSize int           `json:"page_size"`
+	Items    []PageSummary `json:"items"`
 }
 
 // PageDetail extends summary with full content.
@@ -70,9 +78,8 @@ func (s *SQLWriter) ListPages(ctx context.Context, sessionID string, params Page
 	search := strings.TrimSpace(params.Search)
 
 	result := PageListResult{
-		SessionID: sessionID,
-		Page:      page,
-		PageSize:  pageSize,
+		Page:     page,
+		PageSize: pageSize,
 	}
 
 	var (
@@ -89,7 +96,7 @@ func (s *SQLWriter) ListPages(ctx context.Context, sessionID string, params Page
               AND (url ILIKE $2 OR final_url ILIKE $2 OR metadata->>'title' ILIKE $2)`
 		totalArgs = []any{sessionID, pattern}
 		listQuery = `
-            SELECT url, final_url, depth, retrieved_at, status_code, metadata, content_hash, needs_index, indexed_at
+            SELECT url, final_url, depth, retrieved_at, status_code, metadata, content_hash, needs_index, indexed_at, session_id
             FROM pages
             WHERE session_id = $1
               AND (url ILIKE $2 OR final_url ILIKE $2 OR metadata->>'title' ILIKE $2)
@@ -100,7 +107,7 @@ func (s *SQLWriter) ListPages(ctx context.Context, sessionID string, params Page
 		totalQuery = `SELECT COUNT(*) FROM pages WHERE session_id = $1`
 		totalArgs = []any{sessionID}
 		listQuery = `
-            SELECT url, final_url, depth, retrieved_at, status_code, metadata, content_hash, needs_index, indexed_at
+            SELECT url, final_url, depth, retrieved_at, status_code, metadata, content_hash, needs_index, indexed_at, session_id
             FROM pages
             WHERE session_id = $1
             ORDER BY retrieved_at DESC
@@ -130,12 +137,14 @@ func (s *SQLWriter) ListPages(ctx context.Context, sessionID string, params Page
 			contentHash   sql.NullString
 			needsIndex    bool
 			indexedAt     sql.NullTime
+			rowSession    sql.NullString
 		)
-		if err := rows.Scan(&url, &finalURL, &depth, &retrieved, &status, &metadataBytes, &contentHash, &needsIndex, &indexedAt); err != nil {
+		if err := rows.Scan(&url, &finalURL, &depth, &retrieved, &status, &metadataBytes, &contentHash, &needsIndex, &indexedAt, &rowSession); err != nil {
 			return PageListResult{}, fmt.Errorf("scan page: %w", err)
 		}
 		metadata := parseMetadata(metadataBytes)
 		item := PageSummary{
+			SessionID:   rowSession.String,
 			PageID:      EncodePageID(url),
 			VectorID:    GeneratePointID(contentHash.String, url),
 			URL:         url,
@@ -205,6 +214,7 @@ func (s *SQLWriter) GetPageByURL(ctx context.Context, sessionID, url string) (Pa
 	metadata := parseMetadata(metadataBytes)
 	detail := PageDetail{
 		PageSummary: PageSummary{
+			SessionID:   sessionID,
 			PageID:      EncodePageID(url),
 			VectorID:    GeneratePointID(contentHash.String, url),
 			URL:         url,
@@ -239,6 +249,120 @@ func (s *SQLWriter) GetPageByURL(ctx context.Context, sessionID, url string) (Pa
 		detail.Metadata["seed_label"] = seedLabel.String
 	}
 	return detail, nil
+}
+
+func (s *SQLWriter) ListAllPages(ctx context.Context, params PageListParams, sessionID string) (GlobalPageListResult, error) {
+	if s == nil || s.db == nil {
+		return GlobalPageListResult{}, fmt.Errorf("sql store not initialised")
+	}
+	page := params.Page
+	if page <= 0 {
+		page = 1
+	}
+	pageSize := params.PageSize
+	if pageSize <= 0 || pageSize > 200 {
+		pageSize = 20
+	}
+	search := strings.TrimSpace(params.Search)
+
+	result := GlobalPageListResult{
+		Page:     page,
+		PageSize: pageSize,
+	}
+
+	var (
+		whereClauses []string
+		argsTotal    []any
+		argsList     []any
+		argIndex     = 1
+	)
+
+	if sessionID != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("session_id = $%d", argIndex))
+		argsTotal = append(argsTotal, sessionID)
+		argsList = append(argsList, sessionID)
+		argIndex++
+	}
+	if search != "" {
+		pattern := "%" + search + "%"
+		whereClauses = append(whereClauses, fmt.Sprintf("(url ILIKE $%d OR final_url ILIKE $%d OR metadata->>'title' ILIKE $%d)", argIndex, argIndex, argIndex))
+		argsTotal = append(argsTotal, pattern)
+		argsList = append(argsList, pattern)
+		argIndex++
+	}
+
+	whereSQL := ""
+	if len(whereClauses) > 0 {
+		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
+	}
+
+	totalQuery := fmt.Sprintf("SELECT COUNT(*) FROM pages %s", whereSQL)
+	if err := s.db.QueryRowContext(ctx, totalQuery, argsTotal...).Scan(&result.Total); err != nil {
+		return GlobalPageListResult{}, fmt.Errorf("count pages: %w", err)
+	}
+
+	listQuery := fmt.Sprintf(`
+        SELECT session_id, url, final_url, depth, retrieved_at, status_code, metadata,
+               content_hash, needs_index, indexed_at
+        FROM pages
+        %s
+        ORDER BY retrieved_at DESC
+        LIMIT $%d OFFSET $%d`, whereSQL, argIndex, argIndex+1)
+
+	argsList = append(argsList, pageSize, (page-1)*pageSize)
+
+	rows, err := s.db.QueryContext(ctx, listQuery, argsList...)
+	if err != nil {
+		return GlobalPageListResult{}, fmt.Errorf("list pages: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]PageSummary, 0, pageSize)
+	for rows.Next() {
+		var (
+			session       sql.NullString
+			url           string
+			finalURL      sql.NullString
+			depth         int
+			retrieved     time.Time
+			status        int
+			metadataBytes []byte
+			contentHash   sql.NullString
+			needsIndex    bool
+			indexedAt     sql.NullTime
+		)
+		if err := rows.Scan(&session, &url, &finalURL, &depth, &retrieved, &status, &metadataBytes, &contentHash, &needsIndex, &indexedAt); err != nil {
+			return GlobalPageListResult{}, fmt.Errorf("scan page: %w", err)
+		}
+		metadata := parseMetadata(metadataBytes)
+		item := PageSummary{
+			SessionID:   session.String,
+			PageID:      EncodePageID(url),
+			VectorID:    GeneratePointID(contentHash.String, url),
+			URL:         url,
+			FinalURL:    finalURL.String,
+			Depth:       depth,
+			RetrievedAt: retrieved,
+			StatusCode:  status,
+			ContentHash: contentHash.String,
+			NeedsIndex:  needsIndex,
+		}
+		if indexedAt.Valid {
+			item.IndexedAt = &indexedAt.Time
+		}
+		item.Title = metadata["title"]
+		item.ContentType = metadata["content_type"]
+		item.SizeBytes = parseSize(metadata["content_length"])
+		if tags := metadata["tags"]; tags != "" {
+			item.Tags = splitTags(tags)
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return GlobalPageListResult{}, err
+	}
+	result.Items = items
+	return result, nil
 }
 
 func parseMetadata(data []byte) map[string]string {

@@ -19,6 +19,7 @@ import (
 // Server exposes the HTTP API for managing crawler sessions.
 type PageStore interface {
 	ListPages(ctx context.Context, sessionID string, params storage.PageListParams) (storage.PageListResult, error)
+	ListAllPages(ctx context.Context, params storage.PageListParams, sessionID string) (storage.GlobalPageListResult, error)
 	GetPageByURL(ctx context.Context, sessionID, url string) (storage.PageDetail, error)
 }
 
@@ -53,6 +54,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("/health", s.handleHealth)
 	s.mux.HandleFunc("/api/crawler/sessions", s.handleSessions)
 	s.mux.HandleFunc("/api/crawler/sessions/", s.handleSessionByID)
+	s.mux.HandleFunc("/api/crawler/pages", s.handleAllPages)
 	s.mux.HandleFunc("/openapi.yaml", s.handleOpenAPI)
 	s.mux.HandleFunc("/docs", s.handleDocs)
 }
@@ -316,6 +318,47 @@ func (s *Server) getPageDetail(w http.ResponseWriter, r *http.Request, sessionID
 		return
 	}
 	writeJSON(w, http.StatusOK, detail)
+}
+
+func (s *Server) handleAllPages(w http.ResponseWriter, r *http.Request) {
+	if s.pageStore == nil {
+		http.Error(w, "page store not configured", http.StatusNotImplemented)
+		return
+	}
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w, r, http.MethodGet)
+		return
+	}
+	sessionID := strings.TrimSpace(r.URL.Query().Get("session_id"))
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+	search := r.URL.Query().Get("search")
+	params := storage.PageListParams{
+		Page:     page,
+		PageSize: pageSize,
+		Search:   search,
+	}
+	if sessionID != "" {
+		res, err := s.pageStore.ListPages(r.Context(), sessionID, params)
+		if err != nil {
+			if s.logger != nil {
+				s.logger.Error("list session pages failed", "session_id", sessionID, "error", err)
+			}
+			http.Error(w, "failed to list pages", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, res)
+		return
+	}
+	res, err := s.pageStore.ListAllPages(r.Context(), params, "")
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Error("list all pages failed", "error", err)
+		}
+		http.Error(w, "failed to list pages", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 func methodNotAllowed(w http.ResponseWriter, r *http.Request, allowed ...string) {

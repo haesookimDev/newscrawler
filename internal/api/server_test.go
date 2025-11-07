@@ -17,11 +17,19 @@ type fakePageStore struct{}
 
 func (fakePageStore) ListPages(ctx context.Context, sessionID string, params storage.PageListParams) (storage.PageListResult, error) {
 	return storage.PageListResult{
-		SessionID: sessionID,
-		Total:     0,
-		Page:      1,
-		PageSize:  20,
-		Items:     []storage.PageSummary{},
+		Total:    0,
+		Page:     1,
+		PageSize: 20,
+		Items:    []storage.PageSummary{},
+	}, nil
+}
+
+func (fakePageStore) ListAllPages(ctx context.Context, params storage.PageListParams, sessionID string) (storage.GlobalPageListResult, error) {
+	return storage.GlobalPageListResult{
+		Total:    0,
+		Page:     1,
+		PageSize: 20,
+		Items:    []storage.PageSummary{},
 	}, nil
 }
 
