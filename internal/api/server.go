@@ -49,7 +49,7 @@ func NewServer(manager *SessionManager, store PageStore, logger *slog.Logger) *S
 
 // ServeHTTP satisfies the http.Handler interface.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	setCORSHeaders(w)
+	setCORSHeaders(w, r)
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -397,12 +397,20 @@ func (s *Server) handlePageSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
-func setCORSHeaders(w http.ResponseWriter) {
-	origin := strings.TrimSpace(os.Getenv("CORS_ALLOW_ORIGIN"))
-	if origin == "" {
-		origin = "*"
+func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
+	configured := strings.TrimSpace(os.Getenv("CORS_ALLOW_ORIGIN"))
+	origin := configured
+	if origin == "" || origin == "*" {
+		if reqOrigin := strings.TrimSpace(r.Header.Get("Origin")); reqOrigin != "" {
+			origin = reqOrigin
+		} else if origin == "" {
+			origin = "*"
+		}
 	}
 	w.Header().Set("Access-Control-Allow-Origin", origin)
+	if origin != "*" {
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+	}
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-User-ID, X-User-Name")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 	w.Header().Set("Access-Control-Max-Age", "86400")

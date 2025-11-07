@@ -23,7 +23,7 @@ type CreateSessionRequest struct {
 	RateLimit       *RateLimitRequest `json:"rate_limit,omitempty"`
 	Robots          RobotsRequest     `json:"robots"`
 	Media           MediaRequest      `json:"media"`
-	VectorDB        VectorDBRequest   `json:"vector_db"`
+	VectorDB        *VectorDBRequest  `json:"vector_db,omitempty"`
 	DiscoveryBoosts *DiscoveryRequest `json:"discovery,omitempty"`
 
 	UserID   string `json:"-"`

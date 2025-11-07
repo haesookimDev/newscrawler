@@ -285,18 +285,19 @@ func (m *SessionManager) buildConfig(req CreateSessionRequest, sessionID, runID,
 	cfg.Robots.Respect = req.Robots.Respect
 	cfg.Media.Enabled = req.Media.Enabled
 
-	cfg.VectorDB.Provider = strings.TrimSpace(req.VectorDB.Provider)
-	if cfg.VectorDB.Provider == "" {
-		cfg.VectorDB.Provider = "qdrant"
-	}
-	cfg.VectorDB.Endpoint = strings.TrimSpace(req.VectorDB.Endpoint)
-	cfg.VectorDB.APIKey = strings.TrimSpace(req.VectorDB.APIKey)
-	cfg.VectorDB.Index = strings.TrimSpace(req.VectorDB.Index)
-	cfg.VectorDB.Namespace = strings.TrimSpace(req.VectorDB.Namespace)
-	cfg.VectorDB.Dimension = req.VectorDB.Dimension
-	cfg.VectorDB.EmbeddingModel = strings.TrimSpace(req.VectorDB.EmbeddingModel)
-	if req.VectorDB.UpsertBatchSize > 0 {
-		cfg.VectorDB.UpsertBatchSize = req.VectorDB.UpsertBatchSize
+	if req.VectorDB != nil {
+		cfg.VectorDB.Provider = strings.TrimSpace(req.VectorDB.Provider)
+		cfg.VectorDB.Endpoint = strings.TrimSpace(req.VectorDB.Endpoint)
+		cfg.VectorDB.APIKey = strings.TrimSpace(req.VectorDB.APIKey)
+		cfg.VectorDB.Index = strings.TrimSpace(req.VectorDB.Index)
+		cfg.VectorDB.Namespace = strings.TrimSpace(req.VectorDB.Namespace)
+		cfg.VectorDB.Dimension = req.VectorDB.Dimension
+		cfg.VectorDB.EmbeddingModel = strings.TrimSpace(req.VectorDB.EmbeddingModel)
+		if req.VectorDB.UpsertBatchSize > 0 {
+			cfg.VectorDB.UpsertBatchSize = req.VectorDB.UpsertBatchSize
+		}
+	} else {
+		cfg.VectorDB = config.VectorDBConfig{}
 	}
 
 	if req.RateLimit != nil {

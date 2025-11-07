@@ -286,7 +286,6 @@ components:
         - trim_whitespace
         - robots
         - media
-        - vector_db
       properties:
         seed_url:
           type: string

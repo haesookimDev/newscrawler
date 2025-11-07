@@ -450,18 +450,18 @@ func (s *SQLWriter) ListSessionPageOverviews(ctx context.Context, params PageLis
 	items := make([]SessionPageOverview, 0, pageSize)
 	for rows.Next() {
 		var (
-			sessionID  string
-			pageCount  int64
-			lastCrawled time.Time
-			rootURL    sql.NullString
-			rootFinal  sql.NullString
-			rootDepth  sql.NullInt64
+			sessionID     string
+			pageCount     int64
+			lastCrawled   time.Time
+			rootURL       sql.NullString
+			rootFinal     sql.NullString
+			rootDepth     sql.NullInt64
 			rootRetrieved sql.NullTime
-			rootStatus sql.NullInt64
-			rootMetadata []byte
-			rootHash sql.NullString
-			rootNeeds bool
-			rootIndexed sql.NullTime
+			rootStatus    sql.NullInt64
+			rootMetadata  []byte
+			rootHash      sql.NullString
+			rootNeeds     bool
+			rootIndexed   sql.NullTime
 		)
 		if err := rows.Scan(&sessionID, &pageCount, &lastCrawled,
 			&rootURL, &rootFinal, &rootDepth, &rootRetrieved,
