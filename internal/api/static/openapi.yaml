@@ -111,8 +111,6 @@ paths:
         '405':
           $ref: '#/components/responses/MethodNotAllowed'
   /api/crawler/sessions/{session_id}/pages:
-    parameters:
-      - $ref: '#/components/parameters/SessionId'
     get:
       summary: List crawled pages
       operationId: listSessionPages
@@ -148,9 +146,6 @@ paths:
         '405':
           $ref: '#/components/responses/MethodNotAllowed'
   /api/crawler/sessions/{session_id}/pages/{page_id}:
-    parameters:
-      - $ref: '#/components/parameters/SessionId'
-      - $ref: '#/components/parameters/PageId'
     get:
       summary: Get page detail
       operationId: getPageDetail
