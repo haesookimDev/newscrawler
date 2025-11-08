@@ -69,6 +69,17 @@ type SessionPageOverviewResult struct {
 	Items    []SessionPageOverview `json:"items"`
 }
 
+// IndexCandidate holds minimal data required for embedding/indexing.
+type IndexCandidate struct {
+	URL           string
+	FinalURL      string
+	Markdown      string
+	ExtractedText string
+	Metadata      map[string]string
+	SessionID     string
+	ContentHash   string
+}
+
 // PageDetail extends summary with full content.
 type PageDetail struct {
 	PageSummary
@@ -379,6 +390,85 @@ func (s *SQLWriter) ListAllPages(ctx context.Context, params PageListParams, ses
 	}
 	result.Items = items
 	return result, nil
+}
+
+// CountPagesNeedingIndex returns the number of pages in a session awaiting vector indexing.
+func (s *SQLWriter) CountPagesNeedingIndex(ctx context.Context, sessionID string) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, fmt.Errorf("sql store not initialised")
+	}
+	var total int64
+	query := `SELECT COUNT(*) FROM pages WHERE session_id = $1 AND needs_index = TRUE`
+	if err := s.db.QueryRowContext(ctx, query, sessionID).Scan(&total); err != nil {
+		return 0, fmt.Errorf("count needs index: %w", err)
+	}
+	return total, nil
+}
+
+// FetchPagesNeedingIndex retrieves a batch of pages that require indexing.
+func (s *SQLWriter) FetchPagesNeedingIndex(ctx context.Context, sessionID string, limit int) ([]IndexCandidate, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("sql store not initialised")
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	query := `
+		SELECT url, final_url, markdown, extracted_text, metadata, content_hash
+		FROM pages
+		WHERE session_id = $1 AND needs_index = TRUE
+		ORDER BY retrieved_at ASC
+		LIMIT $2`
+	rows, err := s.db.QueryContext(ctx, query, sessionID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("fetch needs index: %w", err)
+	}
+	defer rows.Close()
+
+	candidates := make([]IndexCandidate, 0, limit)
+	for rows.Next() {
+		var (
+			url string
+			finalURL sql.NullString
+			markdown sql.NullString
+			extracted sql.NullString
+			metadataBytes []byte
+			contentHash sql.NullString
+		)
+		if err := rows.Scan(&url, &finalURL, &markdown, &extracted, &metadataBytes, &contentHash); err != nil {
+			return nil, fmt.Errorf("scan needs index: %w", err)
+		}
+		candidate := IndexCandidate{
+			URL:           url,
+			FinalURL:      finalURL.String,
+			Markdown:      markdown.String,
+			ExtractedText: extracted.String,
+			Metadata:      parseMetadata(metadataBytes),
+			SessionID:     sessionID,
+			ContentHash:   contentHash.String,
+		}
+		candidates = append(candidates, candidate)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return candidates, nil
+}
+
+// MarkPageIndexed flips needs_index to false for a page once indexing completes.
+func (s *SQLWriter) MarkPageIndexed(ctx context.Context, sessionID, url string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("sql store not initialised")
+	}
+	query := `
+		UPDATE pages
+		SET needs_index = FALSE,
+		    indexed_at = NOW()
+		WHERE session_id = $1 AND url = $2`
+	if _, err := s.db.ExecContext(ctx, query, sessionID, url); err != nil {
+		return fmt.Errorf("mark indexed: %w", err)
+	}
+	return nil
 }
 
 // ListSessionPageOverviews aggregates per-session stats and root page metadata.

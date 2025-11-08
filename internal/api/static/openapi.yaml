@@ -110,6 +110,73 @@ paths:
           $ref: '#/components/responses/NotFound'
         '405':
           $ref: '#/components/responses/MethodNotAllowed'
+  /api/crawler/sessions/{session_id}/index:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      summary: Get indexing job status
+      operationId: getIndexStatus
+      responses:
+        '200':
+          description: Latest indexing job snapshot or idle state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IndexJobEvent'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+    post:
+      summary: Start indexing job
+      description: >
+        Triggers embedding + vector upserts for pages flagged with `needs_index = true`. Requires `X-User-ID`
+        and `X-User-Name` headers for embedding service authentication.
+      operationId: startIndexJob
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartIndexRequest'
+      responses:
+        '202':
+          description: Indexing job accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IndexJobEvent'
+        '200':
+          description: No pending pages; indexing not started.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IndexJobEvent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: Another indexing job is already running for this session.
+        '412':
+          description: Missing vector database configuration.
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+  /api/crawler/sessions/{session_id}/index/events:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    get:
+      summary: Stream indexing events
+      operationId: streamIndexEvents
+      description: >
+        Server-Sent Event stream with indexing progress, completion, and failure notifications.
+      responses:
+        '200':
+          description: Indexing event stream.
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/IndexJobEvent'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
   /api/crawler/sessions/{session_id}/pages:
     get:
       summary: List crawled pages
@@ -327,6 +394,19 @@ components:
           $ref: '#/components/schemas/VectorDBRequest'
         discovery:
           $ref: '#/components/schemas/DiscoveryRequest'
+    StartIndexRequest:
+      type: object
+      description: >
+        Optional overrides when starting a vector indexing job. Supply `vector_db` if the original
+        session omitted it or when replaying indexing after a restart. Dimension/model fields are filled automatically
+        from the embedding service if they are not provided.
+      properties:
+        vector_db:
+          $ref: '#/components/schemas/VectorDBRequest'
+        batch_size:
+          type: integer
+          minimum: 1
+          description: Overrides the batch size (defaults to vector_db.upsert_batch_size or 32).
     RateLimitRequest:
       type: object
       properties:
@@ -352,13 +432,14 @@ components:
           type: boolean
     VectorDBRequest:
       type: object
+      description: >
+        Base vector store configuration. `dimension` and `embedding_model` are automatically derived from the embedding
+        service when omitted.
       required:
         - provider
         - endpoint
         - index
         - namespace
-        - dimension
-        - embedding_model
       properties:
         provider:
           type: string
@@ -380,6 +461,44 @@ components:
         upsert_batch_size:
           type: integer
           minimum: 1
+    IndexJobEvent:
+      type: object
+      description: Progress snapshot for a vector indexing job. Also used as SSE payload.
+      properties:
+        type:
+          type: string
+          example: index_progress
+        timestamp:
+          type: string
+          format: date-time
+        session_id:
+          type: string
+        status:
+          type: string
+          description: Job lifecycle state.
+          enum:
+            - running
+            - completed
+            - failed
+            - idle
+        total:
+          type: integer
+          minimum: 0
+        processed:
+          type: integer
+          minimum: 0
+        current_url:
+          type: string
+          format: uri
+        message:
+          type: string
+        error:
+          type: string
+      required:
+        - type
+        - timestamp
+        - session_id
+        - status
     DiscoveryRequest:
       type: object
       properties:

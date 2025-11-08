@@ -110,3 +110,9 @@ type SSEEvent struct {
 	Session   SessionSummary         `json:"session"`
 	Progress  *crawler.ProgressEvent `json:"progress,omitempty"`
 }
+
+// StartIndexRequest triggers vector indexing for an existing session.
+type StartIndexRequest struct {
+	VectorDB *VectorDBRequest `json:"vector_db,omitempty"`
+	BatchSize int            `json:"batch_size,omitempty"`
+}

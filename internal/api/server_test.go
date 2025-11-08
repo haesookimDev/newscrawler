@@ -46,6 +46,18 @@ func (fakePageStore) GetPageByURL(ctx context.Context, sessionID, url string) (s
 	return storage.PageDetail{}, sql.ErrNoRows
 }
 
+func (fakePageStore) CountPagesNeedingIndex(ctx context.Context, sessionID string) (int64, error) {
+	return 0, nil
+}
+
+func (fakePageStore) FetchPagesNeedingIndex(ctx context.Context, sessionID string, limit int) ([]storage.IndexCandidate, error) {
+	return nil, nil
+}
+
+func (fakePageStore) MarkPageIndexed(ctx context.Context, sessionID, url string) error {
+	return nil
+}
+
 func TestServerHandlers(t *testing.T) {
 	cfg := config.Default()
 	cfg.Crawl.Seeds = []config.SeedConfig{

@@ -6,14 +6,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"xgen-crawler/internal/config"
 	"xgen-crawler/internal/storage"
 )
 
@@ -23,6 +26,9 @@ type PageStore interface {
 	ListAllPages(ctx context.Context, params storage.PageListParams, sessionID string) (storage.GlobalPageListResult, error)
 	ListSessionPageOverviews(ctx context.Context, params storage.PageListParams) (storage.SessionPageOverviewResult, error)
 	GetPageByURL(ctx context.Context, sessionID, url string) (storage.PageDetail, error)
+	CountPagesNeedingIndex(ctx context.Context, sessionID string) (int64, error)
+	FetchPagesNeedingIndex(ctx context.Context, sessionID string, limit int) ([]storage.IndexCandidate, error)
+	MarkPageIndexed(ctx context.Context, sessionID, url string) error
 }
 
 type Server struct {
@@ -30,6 +36,14 @@ type Server struct {
 	pageStore PageStore
 	mux       *http.ServeMux
 	logger    *slog.Logger
+	indexMu   sync.Mutex
+	indexJobs map[string]*indexJob
+}
+
+const defaultIndexBatchSize = 32
+
+var embeddingHTTPClient = &http.Client{
+	Timeout: 15 * time.Second,
 }
 
 // NewServer wires handlers onto an HTTP mux.
@@ -42,6 +56,7 @@ func NewServer(manager *SessionManager, store PageStore, logger *slog.Logger) *S
 		pageStore: store,
 		mux:       http.NewServeMux(),
 		logger:    logger,
+		indexJobs: make(map[string]*indexJob),
 	}
 	s.routes()
 	return s
@@ -150,6 +165,27 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.getPageDetail(w, r, sessionID, parts[2])
+	case "index":
+		if len(parts) == 2 {
+			switch r.Method {
+			case http.MethodPost:
+				s.startIndexJob(w, r, sessionID)
+			case http.MethodGet:
+				s.getIndexJobStatus(w, r, sessionID)
+			default:
+				methodNotAllowed(w, r, http.MethodGet, http.MethodPost)
+			}
+			return
+		}
+		if len(parts) == 3 && parts[2] == "events" {
+			if r.Method != http.MethodGet {
+				methodNotAllowed(w, r, http.MethodGet)
+				return
+			}
+			s.streamIndexEvents(w, r, sessionID)
+			return
+		}
+		http.NotFound(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -328,6 +364,153 @@ func (s *Server) getPageDetail(w http.ResponseWriter, r *http.Request, sessionID
 	writeJSON(w, http.StatusOK, detail)
 }
 
+func (s *Server) startIndexJob(w http.ResponseWriter, r *http.Request, sessionID string) {
+	if s.pageStore == nil {
+		http.Error(w, "page store not configured", http.StatusNotImplemented)
+		return
+	}
+	userID := strings.TrimSpace(r.Header.Get("X-User-ID"))
+	userName := strings.TrimSpace(r.Header.Get("X-User-Name"))
+	if userID == "" || userName == "" {
+		http.Error(w, "missing X-User-ID or X-User-Name header", http.StatusBadRequest)
+		return
+	}
+
+	var req StartIndexRequest
+	if r.Body != nil {
+		defer r.Body.Close()
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+			return
+		}
+	}
+
+	vectorCfg, ok := s.resolveVectorConfig(sessionID, req.VectorDB)
+	if !ok || strings.TrimSpace(vectorCfg.Provider) == "" {
+		http.Error(w, "vector_db configuration missing; provide it in the request body", http.StatusPreconditionFailed)
+		return
+	}
+
+	if err := s.populateEmbeddingMetadata(r.Context(), &vectorCfg, userID, userName); err != nil {
+		if s.logger != nil {
+			s.logger.Error("embedding metadata fetch failed",
+				"session_id", sessionID,
+				"error", err)
+		}
+		http.Error(w, "failed to load embedding configuration", http.StatusBadGateway)
+		return
+	}
+
+	batchSize := req.BatchSize
+	if batchSize <= 0 {
+		batchSize = vectorCfg.UpsertBatchSize
+	}
+	if batchSize <= 0 {
+		batchSize = defaultIndexBatchSize
+	}
+
+	total, err := s.pageStore.CountPagesNeedingIndex(r.Context(), sessionID)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Error("count needs_index failed", "session_id", sessionID, "error", err)
+		}
+		http.Error(w, "failed to count pending pages", http.StatusInternalServerError)
+		return
+	}
+	if total == 0 {
+		writeJSON(w, http.StatusOK, idleIndexEvent(sessionID, total))
+		return
+	}
+
+	s.indexMu.Lock()
+	if existing, ok := s.indexJobs[sessionID]; ok {
+		if !existing.isFinished() {
+			s.indexMu.Unlock()
+			http.Error(w, "index job already running for this session", http.StatusConflict)
+			return
+		}
+	}
+	job := newIndexJob(sessionID, total)
+	s.indexJobs[sessionID] = job
+	s.indexMu.Unlock()
+
+	if s.logger != nil {
+		s.logger.Info("index job started",
+			"session_id", sessionID,
+			"total_pending", total,
+			"batch_size", batchSize)
+	}
+
+	go s.runIndexJob(job, vectorCfg, batchSize, userID, userName)
+
+	writeJSON(w, http.StatusAccepted, job.snapshot("index_started"))
+}
+
+func (s *Server) getIndexJobStatus(w http.ResponseWriter, r *http.Request, sessionID string) {
+	if s.pageStore == nil {
+		http.Error(w, "page store not configured", http.StatusNotImplemented)
+		return
+	}
+	s.indexMu.Lock()
+	job, ok := s.indexJobs[sessionID]
+	s.indexMu.Unlock()
+	if ok {
+		writeJSON(w, http.StatusOK, job.snapshot("index_status"))
+		return
+	}
+	total, err := s.pageStore.CountPagesNeedingIndex(r.Context(), sessionID)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Error("count needs_index failed", "session_id", sessionID, "error", err)
+		}
+		http.Error(w, "failed to count pending pages", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, idleIndexEvent(sessionID, total))
+}
+
+func (s *Server) streamIndexEvents(w http.ResponseWriter, r *http.Request, sessionID string) {
+	job, ok := s.getIndexJob(sessionID)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+
+	events, cancel := job.subscribe()
+	defer cancel()
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+
+	ctx := r.Context()
+	heartbeat := time.NewTicker(15 * time.Second)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case evt, open := <-events:
+			if !open {
+				return
+			}
+			if err := writeIndexEvent(w, flusher, evt); err != nil {
+				return
+			}
+		case <-heartbeat.C:
+			fmt.Fprint(w, "event: heartbeat\ndata: {}\n\n")
+			flusher.Flush()
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 func (s *Server) handleAllPages(w http.ResponseWriter, r *http.Request) {
 	if s.pageStore == nil {
 		http.Error(w, "page store not configured", http.StatusNotImplemented)
@@ -397,6 +580,78 @@ func (s *Server) handlePageSessions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+func (s *Server) runIndexJob(job *indexJob, vectorCfg config.VectorDBConfig, batchSize int, userID, userName string) {
+	ctx := context.Background()
+	vectorStore, err := storage.NewVectorStore(vectorCfg, s.logger)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Error("vector store init failed", "session_id", job.sessionID, "error", err)
+		}
+		s.failIndexJob(job, fmt.Errorf("vector store init failed: %w", err))
+		return
+	}
+	if vectorStore == nil {
+		s.failIndexJob(job, errors.New("vector store not configured"))
+		return
+	}
+
+	for {
+		candidates, err := s.pageStore.FetchPagesNeedingIndex(ctx, job.sessionID, batchSize)
+		if err != nil {
+			s.failIndexJob(job, fmt.Errorf("fetch pages needing index: %w", err))
+			return
+		}
+		if len(candidates) == 0 {
+			job.complete()
+			if s.logger != nil {
+				s.logger.Info("index job completed", "session_id", job.sessionID)
+			}
+			return
+		}
+
+		for _, candidate := range candidates {
+			url := candidate.URL
+			markdown := strings.TrimSpace(candidate.Markdown)
+			if markdown == "" {
+				if s.logger != nil {
+					s.logger.Warn("skipping page without markdown for indexing",
+						"session_id", job.sessionID,
+						"url", url)
+				}
+				if err := s.pageStore.MarkPageIndexed(ctx, job.sessionID, url); err != nil {
+					s.failIndexJob(job, fmt.Errorf("mark page indexed: %w", err))
+					return
+				}
+				job.progress(url)
+				continue
+			}
+
+			doc := storage.Document{
+				URL:           url,
+				FinalURL:      candidate.FinalURL,
+				Markdown:      candidate.Markdown,
+				ExtractedText: candidate.ExtractedText,
+				Metadata:      candidate.Metadata,
+				SessionID:     job.sessionID,
+				ContentHash:   candidate.ContentHash,
+				NeedsIndex:    true,
+				UserID:        userID,
+				UserName:      userName,
+			}
+
+			if err := vectorStore.UpsertEmbedding(ctx, doc); err != nil {
+				s.failIndexJob(job, fmt.Errorf("vector store upsert failed: %w", err))
+				return
+			}
+			if err := s.pageStore.MarkPageIndexed(ctx, job.sessionID, url); err != nil {
+				s.failIndexJob(job, fmt.Errorf("mark page indexed: %w", err))
+				return
+			}
+			job.progress(url)
+		}
+	}
+}
+
 func setCORSHeaders(w http.ResponseWriter, r *http.Request) {
 	origin := resolveOrigin(r)
 	w.Header().Set("Access-Control-Allow-Origin", origin)
@@ -460,4 +715,126 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 
 func urlPathDecode(segment string) (string, error) {
 	return url.PathUnescape(segment)
+}
+
+func (s *Server) resolveVectorConfig(sessionID string, override *VectorDBRequest) (config.VectorDBConfig, bool) {
+	if override != nil {
+		cfg := vectorRequestToConfig(override)
+		if strings.TrimSpace(cfg.Provider) == "" || strings.TrimSpace(cfg.Endpoint) == "" {
+			return config.VectorDBConfig{}, false
+		}
+		return cfg, true
+	}
+	if session, ok := s.manager.GetSession(sessionID); ok {
+		cfg := session.ConfigSnapshot().VectorDB
+		if strings.TrimSpace(cfg.Provider) != "" && strings.TrimSpace(cfg.Endpoint) != "" {
+			return cfg, true
+		}
+	}
+	return config.VectorDBConfig{}, false
+}
+
+func vectorRequestToConfig(req *VectorDBRequest) config.VectorDBConfig {
+	if req == nil {
+		return config.VectorDBConfig{}
+	}
+	cfg := config.VectorDBConfig{
+		Provider:        strings.TrimSpace(req.Provider),
+		Endpoint:        strings.TrimSpace(req.Endpoint),
+		APIKey:          strings.TrimSpace(req.APIKey),
+		Index:           strings.TrimSpace(req.Index),
+		Namespace:       strings.TrimSpace(req.Namespace),
+		Dimension:       req.Dimension,
+		EmbeddingModel:  strings.TrimSpace(req.EmbeddingModel),
+		UpsertBatchSize: req.UpsertBatchSize,
+	}
+	return cfg
+}
+
+func idleIndexEvent(sessionID string, pending int64) indexEvent {
+	return indexEvent{
+		Type:      "index_idle",
+		Timestamp: time.Now(),
+		SessionID: sessionID,
+		Status:    "idle",
+		Total:     pending,
+		Processed: 0,
+		Message:   "no pages pending indexing",
+	}
+}
+
+func (s *Server) getIndexJob(sessionID string) (*indexJob, bool) {
+	s.indexMu.Lock()
+	job, ok := s.indexJobs[sessionID]
+	s.indexMu.Unlock()
+	return job, ok
+}
+
+func (s *Server) failIndexJob(job *indexJob, err error) {
+	job.fail(err)
+	if s.logger != nil {
+		s.logger.Error("index job failed",
+			"session_id", job.sessionID,
+			"error", err)
+	}
+}
+
+type embeddingConfigResponse struct {
+	ProviderInfo struct {
+		Provider  string `json:"provider"`
+		Model     string `json:"model"`
+		Dimension int    `json:"dimension"`
+	} `json:"provider_info"`
+}
+
+func (s *Server) populateEmbeddingMetadata(ctx context.Context, cfg *config.VectorDBConfig, userID, userName string) error {
+	if cfg == nil {
+		return fmt.Errorf("vector config missing")
+	}
+	info, err := s.fetchEmbeddingConfig(ctx, userID, userName)
+	if err != nil {
+		return err
+	}
+	if info.ProviderInfo.Dimension <= 0 {
+		return fmt.Errorf("invalid embedding dimension %d", info.ProviderInfo.Dimension)
+	}
+	cfg.Dimension = info.ProviderInfo.Dimension
+	if model := strings.TrimSpace(info.ProviderInfo.Model); model != "" {
+		cfg.EmbeddingModel = model
+	}
+	if provider := strings.TrimSpace(info.ProviderInfo.Provider); provider != "" {
+		cfg.Provider = provider
+	}
+	return nil
+}
+
+func (s *Server) fetchEmbeddingConfig(ctx context.Context, userID, userName string) (embeddingConfigResponse, error) {
+	base := strings.TrimSpace(os.Getenv("XGEN_EMBEDDING_BASE_URL"))
+	if base == "" {
+		base = "http://embedding-service:8000"
+	}
+	base = strings.TrimRight(base, "/")
+	configURL := fmt.Sprintf("%s/api/embedding/config-status", base)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, configURL, nil)
+	if err != nil {
+		return embeddingConfigResponse{}, err
+	}
+	req.Header.Set("X-User-ID", userID)
+	req.Header.Set("X-User-Name", userName)
+
+	resp, err := embeddingHTTPClient.Do(req)
+	if err != nil {
+		return embeddingConfigResponse{}, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		msg, _ := io.ReadAll(resp.Body)
+		return embeddingConfigResponse{}, fmt.Errorf("embedding config status failed: status %d body %s", resp.StatusCode, string(msg))
+	}
+	var parsed embeddingConfigResponse
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+		return embeddingConfigResponse{}, fmt.Errorf("decode embedding config: %w", err)
+	}
+	return parsed, nil
 }
