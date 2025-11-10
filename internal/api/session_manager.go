@@ -308,7 +308,7 @@ func (m *SessionManager) Shutdown() {
 }
 
 func (m *SessionManager) buildConfig(req CreateSessionRequest, sessionID, runID, seedURL string, parsed *url.URL) (config.Config, error) {
-	if req.Depth <= 0 {
+	if req.Depth < 0 {
 		return config.Config{}, fmt.Errorf("depth must be > 0")
 	}
 	if strings.TrimSpace(req.UserAgent) == "" {
