@@ -302,6 +302,7 @@ func (s *Server) cancelSession(w http.ResponseWriter, r *http.Request, id string
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	s.abortIndexJob(id, "session cancelled")
 	w.WriteHeader(http.StatusAccepted)
 }
 
@@ -469,7 +470,11 @@ func (s *Server) startIndexJob(w http.ResponseWriter, r *http.Request, sessionID
 			return
 		}
 	}
-	job := newIndexJob(sessionID, total)
+	parentCtx := context.Background()
+	if s.manager != nil && s.manager.rootCtx != nil {
+		parentCtx = s.manager.rootCtx
+	}
+	job := newIndexJob(parentCtx, sessionID, total)
 	s.indexJobs[sessionID] = job
 	s.indexMu.Unlock()
 
@@ -480,7 +485,10 @@ func (s *Server) startIndexJob(w http.ResponseWriter, r *http.Request, sessionID
 			"batch_size", batchSize)
 	}
 
-	go s.runIndexJob(job, vectorCfg, batchSize, userID, userName)
+	go func() {
+		defer s.clearIndexJob(sessionID, job)
+		s.runIndexJob(job, vectorCfg, batchSize, userID, userName)
+	}()
 
 	writeJSON(w, http.StatusAccepted, job.snapshot("index_started"))
 }
@@ -620,7 +628,7 @@ func (s *Server) handlePageSessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) runIndexJob(job *indexJob, vectorCfg config.VectorDBConfig, batchSize int, userID, userName string) {
-	ctx := context.Background()
+	ctx := job.Context()
 	vectorStore, err := storage.NewVectorStore(vectorCfg, s.logger)
 	if err != nil {
 		if s.logger != nil {
@@ -637,6 +645,10 @@ func (s *Server) runIndexJob(job *indexJob, vectorCfg config.VectorDBConfig, bat
 	processed := make(map[string]struct{})
 
 	for {
+		if err := ctx.Err(); err != nil {
+			job.cancelWithReason("index job cancelled")
+			return
+		}
 		candidates, err := s.pageStore.FetchPagesNeedingIndex(ctx, job.sessionID, batchSize)
 		if err != nil {
 			s.failIndexJob(job, fmt.Errorf("fetch pages needing index: %w", err))
@@ -658,6 +670,10 @@ func (s *Server) runIndexJob(job *indexJob, vectorCfg config.VectorDBConfig, bat
 		}
 
 		for _, candidate := range pending {
+			if err := ctx.Err(); err != nil {
+				job.cancelWithReason("index job cancelled")
+				return
+			}
 			processed[candidate.URL] = struct{}{}
 			url := candidate.URL
 			markdown := strings.TrimSpace(candidate.Markdown)
@@ -810,6 +826,36 @@ func (s *Server) getIndexJob(sessionID string) (*indexJob, bool) {
 	job, ok := s.indexJobs[sessionID]
 	s.indexMu.Unlock()
 	return job, ok
+}
+
+func (s *Server) clearIndexJob(sessionID string, job *indexJob) {
+	if s == nil || job == nil {
+		return
+	}
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
+	current, ok := s.indexJobs[sessionID]
+	if ok && current == job {
+		delete(s.indexJobs, sessionID)
+	}
+}
+
+func (s *Server) abortIndexJob(sessionID, reason string) {
+	if s == nil {
+		return
+	}
+	s.indexMu.Lock()
+	job, ok := s.indexJobs[sessionID]
+	if ok {
+		delete(s.indexJobs, sessionID)
+	}
+	s.indexMu.Unlock()
+	if ok && job != nil {
+		if strings.TrimSpace(reason) == "" {
+			reason = "index job cancelled"
+		}
+		job.cancelWithReason(reason)
+	}
 }
 
 func (s *Server) failIndexJob(job *indexJob, err error) {

@@ -356,9 +356,9 @@ func (m *SessionManager) buildConfig(req CreateSessionRequest, sessionID, runID,
 	cfg.Robots.Respect = req.Robots.Respect
 	cfg.Media.Enabled = req.Media.Enabled
 
+	cfg.VectorDB = config.VectorDBConfig{}
 	if req.VectorDB != nil {
-		override := vectorRequestToConfig(req.VectorDB)
-		cfg.VectorDB = mergeVectorConfig(cfg.VectorDB, override)
+		cfg.VectorDB = vectorRequestToConfig(req.VectorDB)
 	}
 
 	if req.RateLimit != nil {

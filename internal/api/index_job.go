@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -30,15 +31,37 @@ type indexJob struct {
 	current   string
 	subs      map[chan indexEvent]struct{}
 	finished  bool
+	ctx       context.Context
+	cancel    context.CancelFunc
 	mu        sync.Mutex
 }
 
-func newIndexJob(sessionID string, total int64) *indexJob {
+func newIndexJob(parent context.Context, sessionID string, total int64) *indexJob {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
 	return &indexJob{
 		sessionID: sessionID,
 		total:     total,
 		status:    "running",
+		ctx:       ctx,
+		cancel:    cancel,
 		subs:      make(map[chan indexEvent]struct{}),
+	}
+}
+
+func (j *indexJob) Context() context.Context {
+	if j == nil || j.ctx == nil {
+		return context.Background()
+	}
+	return j.ctx
+}
+
+func (j *indexJob) stopContext() {
+	if j.cancel != nil {
+		j.cancel()
+		j.cancel = nil
 	}
 }
 
@@ -96,7 +119,7 @@ func (j *indexJob) broadcast(eventType string) {
 		default:
 		}
 	}
-	shouldClose := eventType == "index_completed" || eventType == "index_failed"
+	shouldClose := eventType == "index_completed" || eventType == "index_failed" || eventType == "index_cancelled"
 	if shouldClose {
 		for ch := range j.subs {
 			close(ch)
@@ -125,6 +148,7 @@ func (j *indexJob) progressWithMessage(url, message string) {
 }
 
 func (j *indexJob) complete() {
+	j.stopContext()
 	j.mu.Lock()
 	j.status = "completed"
 	j.finished = true
@@ -133,12 +157,27 @@ func (j *indexJob) complete() {
 }
 
 func (j *indexJob) fail(err error) {
+	j.stopContext()
 	j.mu.Lock()
 	j.status = "failed"
 	j.err = err.Error()
 	j.finished = true
 	j.mu.Unlock()
 	j.broadcast("index_failed")
+}
+
+func (j *indexJob) cancelWithReason(reason string) {
+	j.stopContext()
+	j.mu.Lock()
+	if j.finished {
+		j.mu.Unlock()
+		return
+	}
+	j.status = "cancelled"
+	j.message = reason
+	j.finished = true
+	j.mu.Unlock()
+	j.broadcast("index_cancelled")
 }
 
 func (j *indexJob) isFinished() bool {

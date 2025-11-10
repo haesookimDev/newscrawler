@@ -377,7 +377,8 @@ func (e *Engine) Run(ctx context.Context) error {
 func (e *Engine) Close() error {
 	var err error
 	e.closeOnce.Do(func() {
-		for _, closer := range e.closers {
+		for i := len(e.closers) - 1; i >= 0; i-- {
+			closer := e.closers[i]
 			if cerr := closer(); cerr != nil {
 				if err == nil {
 					err = cerr
