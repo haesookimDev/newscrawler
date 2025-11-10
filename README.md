@@ -36,6 +36,7 @@ Each module is documented inline. Extend the configuration to suit deployment en
 ### Environment Overrides
 
 - Set `XGEN_DB_DRIVER` and `XGEN_DB_DSN` to override the database connection supplied in YAML.
+- Set `XGEN_DOC_DB_DRIVER` / `XGEN_DOC_DB_DSN` when the downstream document/vector database (used for `/documents` sync) lives in a separate Postgres instance.
 - Set `XGEN_VECTOR_*` variables (`PROVIDER`, `ENDPOINT`, `API_KEY`, `INDEX`, `NAMESPACE`, `DIMENSION`, `EMBEDDING_MODEL`, `UPSERT_BATCH_SIZE`) to replace vector DB settings at runtime.
 - Set `XGEN_EMBEDDING_BASE_URL` to point at the embedding microservice (defaults to `http://embedding-service:8000`).
 - Set `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, `REDIS_PASSWORD` to enable Redis-backed session persistence (optional; when unset, in-memory session tracking is used).

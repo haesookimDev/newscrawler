@@ -38,12 +38,15 @@ type PageStore interface {
 	CountPagesNeedingIndex(ctx context.Context, sessionID string) (int64, error)
 	FetchPagesNeedingIndex(ctx context.Context, sessionID string, limit int) ([]storage.IndexCandidate, error)
 	MarkPageIndexed(ctx context.Context, sessionID, url string) error
+	FetchPagesReadyForDocumentSync(ctx context.Context, sessionID string, limit int) ([]storage.DocumentSyncCandidate, error)
+	MarkPageDocumentIntegrated(ctx context.Context, sessionID, url string) error
 	DeleteSessionData(ctx context.Context, sessionID string) error
 }
 
 type Server struct {
 	manager   *SessionManager
 	pageStore PageStore
+	docStore  storage.DocumentSyncStore
 	mux       *http.ServeMux
 	logger    *slog.Logger
 	indexMu   sync.Mutex
@@ -57,13 +60,19 @@ var embeddingHTTPClient = &http.Client{
 }
 
 // NewServer wires handlers onto an HTTP mux.
-func NewServer(manager *SessionManager, store PageStore, logger *slog.Logger) *Server {
+func NewServer(manager *SessionManager, store PageStore, docStore storage.DocumentSyncStore, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if docStore == nil {
+		if ds, ok := store.(storage.DocumentSyncStore); ok {
+			docStore = ds
+		}
 	}
 	s := &Server{
 		manager:   manager,
 		pageStore: store,
+		docStore:  docStore,
 		mux:       http.NewServeMux(),
 		logger:    logger,
 		indexJobs: make(map[string]*indexJob),
@@ -622,8 +631,7 @@ func (s *Server) syncSessionDocuments(w http.ResponseWriter, r *http.Request, se
 		http.Error(w, "page store not configured", http.StatusNotImplemented)
 		return
 	}
-	docStore, ok := s.pageStore.(storage.DocumentSyncStore)
-	if !ok {
+	if s.docStore == nil {
 		http.Error(w, "document sync not supported", http.StatusNotImplemented)
 		return
 	}
@@ -676,7 +684,7 @@ func (s *Server) syncSessionDocuments(w http.ResponseWriter, r *http.Request, se
 		SharePermissions:   "read",
 	}
 	ctx := r.Context()
-	if err := docStore.UpsertVectorCollection(ctx, collectionRecord); err != nil {
+	if err := s.docStore.UpsertVectorCollection(ctx, collectionRecord); err != nil {
 		if s.logger != nil {
 			s.logger.Error("vector collection upsert failed",
 				"session_id", sessionID,
@@ -698,7 +706,7 @@ func (s *Server) syncSessionDocuments(w http.ResponseWriter, r *http.Request, se
 			http.Error(w, "request cancelled", http.StatusRequestTimeout)
 			return
 		}
-		candidates, err := docStore.FetchPagesReadyForDocumentSync(ctx, sessionID, batchSize)
+		candidates, err := s.pageStore.FetchPagesReadyForDocumentSync(ctx, sessionID, batchSize)
 		if err != nil {
 			if s.logger != nil {
 				s.logger.Error("fetch pages for document sync failed",
@@ -713,7 +721,7 @@ func (s *Server) syncSessionDocuments(w http.ResponseWriter, r *http.Request, se
 		}
 		for _, candidate := range candidates {
 			chunk := buildChunkRecord(candidate, collectionName, userIDPtr, vectorCfg)
-			if err := docStore.UpsertVectorChunk(ctx, chunk); err != nil {
+			if err := s.docStore.UpsertVectorChunk(ctx, chunk); err != nil {
 				if s.logger != nil {
 					s.logger.Error("vector chunk upsert failed",
 						"session_id", sessionID,
@@ -723,7 +731,7 @@ func (s *Server) syncSessionDocuments(w http.ResponseWriter, r *http.Request, se
 				http.Error(w, "failed to store document chunk", http.StatusBadGateway)
 				return
 			}
-			if err := docStore.MarkPageDocumentIntegrated(ctx, sessionID, candidate.URL); err != nil {
+			if err := s.pageStore.MarkPageDocumentIntegrated(ctx, sessionID, candidate.URL); err != nil {
 				if s.logger != nil {
 					s.logger.Error("mark document integrated failed",
 						"session_id", sessionID,

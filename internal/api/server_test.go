@@ -58,6 +58,14 @@ func (fakePageStore) MarkPageIndexed(ctx context.Context, sessionID, url string)
 	return nil
 }
 
+func (fakePageStore) FetchPagesReadyForDocumentSync(ctx context.Context, sessionID string, limit int) ([]storage.DocumentSyncCandidate, error) {
+	return nil, nil
+}
+
+func (fakePageStore) MarkPageDocumentIntegrated(ctx context.Context, sessionID, url string) error {
+	return nil
+}
+
 func (fakePageStore) DeleteSessionData(ctx context.Context, sessionID string) error {
 	return nil
 }
@@ -70,7 +78,7 @@ func TestServerHandlers(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	manager := NewSessionManager(cfg, 1, context.Background(), logger, nil)
-	server := NewServer(manager, fakePageStore{}, logger)
+	server := NewServer(manager, fakePageStore{}, nil, logger)
 
 	assertRoute(t, server, http.MethodGet, "/health", http.StatusOK, "application/json")
 	assertRoute(t, server, http.MethodGet, "/openapi.yaml", http.StatusOK, "application/yaml")
@@ -102,7 +110,7 @@ func TestResolveVectorConfigFallbackToBaseConfig(t *testing.T) {
 	base.VectorDB.Endpoint = "http://vector.example.com"
 
 	manager := NewSessionManager(base, 1, context.Background(), nil, nil)
-	server := NewServer(manager, nil, nil)
+	server := NewServer(manager, nil, nil, nil)
 
 	cfg, ok := server.resolveVectorConfig("nonexistent", nil)
 	if !ok {

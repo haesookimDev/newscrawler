@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -55,7 +56,33 @@ func main() {
 	}
 	defer pageStore.Close()
 
-	server := api.NewServer(manager, pageStore, logger)
+	var (
+		docStore  storage.DocumentSyncStore
+		docCloser func()
+	)
+	trimmedDocDSN := strings.TrimSpace(baseCfg.DocumentDB.DSN)
+	if trimmedDocDSN != "" {
+		docCfg := baseCfg.DocumentDB
+		if strings.TrimSpace(docCfg.Driver) == "" {
+			docCfg.Driver = baseCfg.DB.Driver
+		}
+		docWriter, err := storage.NewSQLWriter(docCfg)
+		if err != nil {
+			logger.Error("initialise document store failed", "error", err)
+			log.Fatalf("failed to initialise document store: %v", err)
+		}
+		docStore = docWriter
+		docCloser = func() {
+			_ = docWriter.Close()
+		}
+	} else {
+		docStore = pageStore
+	}
+	if docCloser != nil {
+		defer docCloser()
+	}
+
+	server := api.NewServer(manager, pageStore, docStore, logger)
 
 	httpServer := &http.Server{
 		Addr:    *addr,

@@ -64,11 +64,8 @@ type VectorChunkRecord struct {
 	EmbeddingDimension int
 }
 
-// DocumentSyncStore defines the functionality required to copy indexed pages
-// into the downstream document database.
+// DocumentSyncStore handles writes to the downstream document/vector database.
 type DocumentSyncStore interface {
-	FetchPagesReadyForDocumentSync(ctx context.Context, sessionID string, limit int) ([]DocumentSyncCandidate, error)
-	MarkPageDocumentIntegrated(ctx context.Context, sessionID, url string) error
 	UpsertVectorCollection(ctx context.Context, record VectorCollectionRecord) error
 	UpsertVectorChunk(ctx context.Context, record VectorChunkRecord) error
 }

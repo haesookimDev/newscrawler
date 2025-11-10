@@ -16,6 +16,7 @@ import (
 // Config captures the full configuration required to initialise the crawler engine.
 type Config struct {
 	DB         SQLConfig        `yaml:"db"`
+	DocumentDB SQLConfig        `yaml:"document_db"`
 	VectorDB   VectorDBConfig   `yaml:"vector_db"`
 	Worker     WorkerConfig     `yaml:"worker"`
 	Crawl      CrawlConfig      `yaml:"crawl"`
@@ -428,6 +429,12 @@ func (c *Config) applyEnvOverrides() {
 	}
 	if v := strings.TrimSpace(os.Getenv("XGEN_DB_DSN")); v != "" {
 		c.DB.DSN = v
+	}
+	if v := strings.TrimSpace(os.Getenv("XGEN_DOC_DB_DRIVER")); v != "" {
+		c.DocumentDB.Driver = v
+	}
+	if v := strings.TrimSpace(os.Getenv("XGEN_DOC_DB_DSN")); v != "" {
+		c.DocumentDB.DSN = v
 	}
 
 	if v := strings.TrimSpace(os.Getenv("XGEN_VECTOR_PROVIDER")); v != "" {
