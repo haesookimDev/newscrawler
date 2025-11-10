@@ -79,6 +79,7 @@ type RelationalStore interface {
 // VectorStore persists embeddings into a vector database.
 type VectorStore interface {
 	UpsertEmbedding(ctx context.Context, doc Document) error
+	DeleteSessionVectors(ctx context.Context, sessionID string) error
 }
 
 // MediaStore persists binary assets to an external storage system.
@@ -553,6 +554,11 @@ type NoopVectorStore struct{}
 
 // UpsertEmbedding satisfies the VectorStore interface without persisting data.
 func (NoopVectorStore) UpsertEmbedding(ctx context.Context, doc Document) error {
+	return nil
+}
+
+// DeleteSessionVectors is a no-op for the placeholder implementation.
+func (NoopVectorStore) DeleteSessionVectors(ctx context.Context, sessionID string) error {
 	return nil
 }
 

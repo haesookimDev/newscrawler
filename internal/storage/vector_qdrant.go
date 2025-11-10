@@ -298,3 +298,37 @@ func (s *QdrantStore) collectionURL(collection string) string {
 func (s *QdrantStore) collectionPointsURL(collection string) string {
 	return fmt.Sprintf("%s/collections/%s/points", s.endpoint, url.PathEscape(collection))
 }
+
+// DeleteSessionVectors drops the per-session collection from Qdrant.
+func (s *QdrantStore) DeleteSessionVectors(ctx context.Context, sessionID string) error {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, s.collectionURL(sessionID), nil)
+	if err != nil {
+		return fmt.Errorf("build delete collection request: %w", err)
+	}
+	if s.apiKey != "" {
+		req.Header.Set("api-key", s.apiKey)
+	}
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("delete collection: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	if resp.StatusCode >= 400 {
+		msg, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("delete collection failed: status %d body %s", resp.StatusCode, string(msg))
+	}
+
+	s.mu.Lock()
+	delete(s.collections, sessionID)
+	s.mu.Unlock()
+	return nil
+}

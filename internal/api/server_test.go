@@ -58,6 +58,10 @@ func (fakePageStore) MarkPageIndexed(ctx context.Context, sessionID, url string)
 	return nil
 }
 
+func (fakePageStore) DeleteSessionData(ctx context.Context, sessionID string) error {
+	return nil
+}
+
 func TestServerHandlers(t *testing.T) {
 	cfg := config.Default()
 	cfg.Crawl.Seeds = []config.SeedConfig{

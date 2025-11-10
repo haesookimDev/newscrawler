@@ -35,6 +35,7 @@ type PageStore interface {
 	CountPagesNeedingIndex(ctx context.Context, sessionID string) (int64, error)
 	FetchPagesNeedingIndex(ctx context.Context, sessionID string, limit int) ([]storage.IndexCandidate, error)
 	MarkPageIndexed(ctx context.Context, sessionID, url string) error
+	DeleteSessionData(ctx context.Context, sessionID string) error
 }
 
 type Server struct {
@@ -162,8 +163,10 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
 			s.getSession(w, r, sessionID)
+		case http.MethodDelete:
+			s.deleteSessionData(w, r, sessionID)
 		default:
-			methodNotAllowed(w, r, http.MethodGet)
+			methodNotAllowed(w, r, http.MethodGet, http.MethodDelete)
 		}
 		return
 	}
@@ -304,6 +307,45 @@ func (s *Server) cancelSession(w http.ResponseWriter, r *http.Request, id string
 	}
 	s.abortIndexJob(id, "session cancelled")
 	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *Server) deleteSessionData(w http.ResponseWriter, r *http.Request, id string) {
+	if s.pageStore == nil {
+		http.Error(w, "page store not configured", http.StatusNotImplemented)
+		return
+	}
+	if s.logger != nil {
+		s.logger.Info("delete session data request", "session_id", id)
+	}
+	if s.manager != nil {
+		if session, ok := s.manager.GetSession(id); ok {
+			summary := session.Snapshot()
+			if summary.Status == SessionStatusRunning || summary.Status == SessionStatusCancelling {
+				http.Error(w, "session is running; cancel before deleting data", http.StatusConflict)
+				return
+			}
+		}
+	}
+	s.abortIndexJob(id, "session deleted")
+	ctx := r.Context()
+	if err := s.pageStore.DeleteSessionData(ctx, id); err != nil {
+		if s.logger != nil {
+			s.logger.Error("delete session data failed", "session_id", id, "error", err)
+		}
+		http.Error(w, "failed to delete session data", http.StatusInternalServerError)
+		return
+	}
+	if err := s.deleteVectorData(ctx, id); err != nil {
+		if s.logger != nil {
+			s.logger.Error("delete vector data failed", "session_id", id, "error", err)
+		}
+		http.Error(w, "failed to delete vector data", http.StatusBadGateway)
+		return
+	}
+	if s.manager != nil {
+		s.manager.removeSnapshot(id)
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) streamSessionEvents(w http.ResponseWriter, r *http.Request, id string) {
@@ -856,6 +898,24 @@ func (s *Server) abortIndexJob(sessionID, reason string) {
 		}
 		job.cancelWithReason(reason)
 	}
+}
+
+func (s *Server) deleteVectorData(ctx context.Context, sessionID string) error {
+	vectorCfg, ok := s.resolveVectorConfig(sessionID, nil)
+	if !ok || !vectorConfigComplete(vectorCfg) {
+		return nil
+	}
+	vectorStore, err := storage.NewVectorStore(vectorCfg, s.logger)
+	if err != nil {
+		return fmt.Errorf("vector store init failed: %w", err)
+	}
+	if vectorStore == nil {
+		return nil
+	}
+	if err := vectorStore.DeleteSessionVectors(ctx, sessionID); err != nil {
+		return fmt.Errorf("delete vector data: %w", err)
+	}
+	return nil
 }
 
 func (s *Server) failIndexJob(job *indexJob, err error) {

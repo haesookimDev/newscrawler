@@ -487,6 +487,20 @@ func (s *SQLWriter) MarkPageNeedsIndex(ctx context.Context, sessionID, url strin
 	return nil
 }
 
+// DeleteSessionData removes all persisted rows for a given session.
+func (s *SQLWriter) DeleteSessionData(ctx context.Context, sessionID string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("sql store not initialised")
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return fmt.Errorf("missing session id")
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM pages WHERE session_id = $1`, sessionID); err != nil {
+		return fmt.Errorf("delete session pages: %w", err)
+	}
+	return nil
+}
+
 // ListSessionPageOverviews aggregates per-session stats and root page metadata.
 func (s *SQLWriter) ListSessionPageOverviews(ctx context.Context, params PageListParams) (SessionPageOverviewResult, error) {
 	if s == nil || s.db == nil {
