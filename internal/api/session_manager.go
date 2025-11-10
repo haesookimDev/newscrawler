@@ -357,18 +357,8 @@ func (m *SessionManager) buildConfig(req CreateSessionRequest, sessionID, runID,
 	cfg.Media.Enabled = req.Media.Enabled
 
 	if req.VectorDB != nil {
-		cfg.VectorDB.Provider = strings.TrimSpace(req.VectorDB.Provider)
-		cfg.VectorDB.Endpoint = strings.TrimSpace(req.VectorDB.Endpoint)
-		cfg.VectorDB.APIKey = strings.TrimSpace(req.VectorDB.APIKey)
-		cfg.VectorDB.Index = strings.TrimSpace(req.VectorDB.Index)
-		cfg.VectorDB.Namespace = strings.TrimSpace(req.VectorDB.Namespace)
-		cfg.VectorDB.Dimension = req.VectorDB.Dimension
-		cfg.VectorDB.EmbeddingModel = strings.TrimSpace(req.VectorDB.EmbeddingModel)
-		if req.VectorDB.UpsertBatchSize > 0 {
-			cfg.VectorDB.UpsertBatchSize = req.VectorDB.UpsertBatchSize
-		}
-	} else {
-		cfg.VectorDB = config.VectorDBConfig{}
+		override := vectorRequestToConfig(req.VectorDB)
+		cfg.VectorDB = mergeVectorConfig(cfg.VectorDB, override)
 	}
 
 	if req.RateLimit != nil {

@@ -420,8 +420,8 @@ func (s *Server) startIndexJob(w http.ResponseWriter, r *http.Request, sessionID
 	}
 
 	vectorCfg, ok := s.resolveVectorConfig(sessionID, req.VectorDB)
-	if !ok || strings.TrimSpace(vectorCfg.Provider) == "" {
-		http.Error(w, "vector_db configuration missing; provide it in the request body", http.StatusPreconditionFailed)
+	if !ok {
+		http.Error(w, "vector_db configuration missing; provide overrides or configure defaults for this session", http.StatusPreconditionFailed)
 		return
 	}
 
@@ -432,6 +432,11 @@ func (s *Server) startIndexJob(w http.ResponseWriter, r *http.Request, sessionID
 				"error", err)
 		}
 		http.Error(w, "failed to load embedding configuration", http.StatusBadGateway)
+		return
+	}
+
+	if !vectorConfigComplete(vectorCfg) {
+		http.Error(w, "vector_db configuration incomplete; provider and endpoint are required", http.StatusPreconditionFailed)
 		return
 	}
 
@@ -762,48 +767,30 @@ func urlPathDecode(segment string) (string, error) {
 }
 
 func (s *Server) resolveVectorConfig(sessionID string, override *VectorDBRequest) (config.VectorDBConfig, bool) {
-	if override != nil {
-		cfg := vectorRequestToConfig(override)
-		if !vectorConfigUsable(cfg) {
-			return config.VectorDBConfig{}, false
-		}
-		return cfg, true
-	}
+	var cfg config.VectorDBConfig
+	var have bool
 
 	if s.manager != nil {
+		base := s.manager.baseConfig.VectorDB
+		have = have || vectorConfigProvided(base)
 		if session, ok := s.manager.GetSession(sessionID); ok {
-			cfg := session.ConfigSnapshot().VectorDB
-			if vectorConfigUsable(cfg) {
-				return cfg, true
-			}
+			snap := session.ConfigSnapshot().VectorDB
+			base = mergeVectorConfig(base, snap)
+			have = have || vectorConfigProvided(snap)
 		}
-		baseCfg := s.manager.baseConfig.VectorDB
-		if vectorConfigUsable(baseCfg) {
-			return baseCfg, true
-		}
+		cfg = base
 	}
-	return config.VectorDBConfig{}, false
-}
 
-func vectorRequestToConfig(req *VectorDBRequest) config.VectorDBConfig {
-	if req == nil {
-		return config.VectorDBConfig{}
+	if override != nil {
+		overrideCfg := vectorRequestToConfig(override)
+		cfg = mergeVectorConfig(cfg, overrideCfg)
+		have = have || vectorConfigProvided(overrideCfg)
 	}
-	cfg := config.VectorDBConfig{
-		Provider:        strings.TrimSpace(req.Provider),
-		Endpoint:        strings.TrimSpace(req.Endpoint),
-		APIKey:          strings.TrimSpace(req.APIKey),
-		Index:           strings.TrimSpace(req.Index),
-		Namespace:       strings.TrimSpace(req.Namespace),
-		Dimension:       req.Dimension,
-		EmbeddingModel:  strings.TrimSpace(req.EmbeddingModel),
-		UpsertBatchSize: req.UpsertBatchSize,
-	}
-	return cfg
-}
 
-func vectorConfigUsable(cfg config.VectorDBConfig) bool {
-	return strings.TrimSpace(cfg.Provider) != "" && strings.TrimSpace(cfg.Endpoint) != ""
+	if !have {
+		return config.VectorDBConfig{}, false
+	}
+	return cfg, true
 }
 
 func idleIndexEvent(sessionID string, pending int64) indexEvent {

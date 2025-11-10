@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -23,6 +24,6 @@ func NewVectorStore(cfg config.VectorDBConfig, logger *slog.Logger) (VectorStore
 		}
 		return NewQdrantStore(cfg, embedBase, logger)
 	default:
-		return NoopVectorStore{}, nil
+		return nil, fmt.Errorf("unsupported vector provider %q", cfg.Provider)
 	}
 }
