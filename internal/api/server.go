@@ -20,13 +20,11 @@ import (
 	"xgen-crawler/internal/storage"
 )
 
-// TODO 크롤링할때 오류가 발생하면 크롤링이 종료되어서 기존에 대기열에 있는 페이지는 크롤링이 진행이 안되는 문제 해결필요
-// TODO 인덱싱 도중 오류가 발생하면 중단되는데 이경우도 기존 대기열에 있는 페이지들은 인덱싱이 진행이 안되는 문제 해결필요
-
-// TODO 크롤링 과정에서 인덱싱도 하는 옵션이 있을때 임베딩에 병목이 생기면 크롤링 과정에도 문제가 발생하면 안되므로 별도의 워커로 인덱싱을 처리하도록 개선 필요
-// TODO 크롤링하면서 인덱싱할때 need_index는 false로 표시해야하고 문제가 발생해서 인덱싱이 안된 페이지만 인덱싱 필요 옵션 설정해야함
-
-// TODO 크롤링 세션이 너무 많아지면 메모리 사용량이 증가할 수 있으므로 더 이상 사용하지않는 오래된 세션은 redis에 저장 후 정리하는 정책 필요
+const (
+	maxResidentSessions       = 128
+	sessionEvictionInterval   = time.Minute
+	sessionEvictionIdleWindow = 15 * time.Minute
+)
 
 // Server exposes the HTTP API for managing crawler sessions.
 type PageStore interface {
@@ -67,7 +65,35 @@ func NewServer(manager *SessionManager, store PageStore, logger *slog.Logger) *S
 		indexJobs: make(map[string]*indexJob),
 	}
 	s.routes()
+	s.startSessionEvictionLoop()
 	return s
+}
+
+func (s *Server) startSessionEvictionLoop() {
+	if s == nil || s.manager == nil || s.manager.stateStore == nil || maxResidentSessions <= 0 {
+		return
+	}
+	ctx := s.manager.rootCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ticker := time.NewTicker(sessionEvictionInterval)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				evicted := s.manager.EvictInactiveSessions(maxResidentSessions, sessionEvictionIdleWindow)
+				if evicted > 0 && s.logger != nil {
+					s.logger.Info("evicted stale sessions",
+						"count", evicted,
+						"max_resident", maxResidentSessions)
+				}
+			}
+		}
+	}()
 }
 
 // ServeHTTP satisfies the http.Handler interface.
@@ -603,13 +629,22 @@ func (s *Server) runIndexJob(job *indexJob, vectorCfg config.VectorDBConfig, bat
 		return
 	}
 
+	processed := make(map[string]struct{})
+
 	for {
 		candidates, err := s.pageStore.FetchPagesNeedingIndex(ctx, job.sessionID, batchSize)
 		if err != nil {
 			s.failIndexJob(job, fmt.Errorf("fetch pages needing index: %w", err))
 			return
 		}
-		if len(candidates) == 0 {
+		pending := make([]storage.IndexCandidate, 0, len(candidates))
+		for _, candidate := range candidates {
+			if _, seen := processed[candidate.URL]; seen {
+				continue
+			}
+			pending = append(pending, candidate)
+		}
+		if len(pending) == 0 {
 			job.complete()
 			if s.logger != nil {
 				s.logger.Info("index job completed", "session_id", job.sessionID)
@@ -617,7 +652,8 @@ func (s *Server) runIndexJob(job *indexJob, vectorCfg config.VectorDBConfig, bat
 			return
 		}
 
-		for _, candidate := range candidates {
+		for _, candidate := range pending {
+			processed[candidate.URL] = struct{}{}
 			url := candidate.URL
 			markdown := strings.TrimSpace(candidate.Markdown)
 			if markdown == "" {
@@ -648,8 +684,8 @@ func (s *Server) runIndexJob(job *indexJob, vectorCfg config.VectorDBConfig, bat
 			}
 
 			if err := vectorStore.UpsertEmbedding(ctx, doc); err != nil {
-				s.failIndexJob(job, fmt.Errorf("vector store upsert failed: %w", err))
-				return
+				s.handleIndexCandidateFailure(job, url, err)
+				continue
 			}
 			if err := s.pageStore.MarkPageIndexed(ctx, job.sessionID, url); err != nil {
 				s.failIndexJob(job, fmt.Errorf("mark page indexed: %w", err))
@@ -796,6 +832,17 @@ func (s *Server) failIndexJob(job *indexJob, err error) {
 			"session_id", job.sessionID,
 			"error", err)
 	}
+}
+
+func (s *Server) handleIndexCandidateFailure(job *indexJob, url string, err error) {
+	if s.logger != nil {
+		s.logger.Warn("index candidate failed; skipping for this run",
+			"session_id", job.sessionID,
+			"url", url,
+			"error", err)
+	}
+	msg := fmt.Sprintf("failed to index %s: %v", url, err)
+	job.progressWithMessage(url, msg)
 }
 
 type embeddingConfigResponse struct {

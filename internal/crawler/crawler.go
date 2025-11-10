@@ -17,6 +17,7 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -203,7 +204,10 @@ func NewEngine(cfg config.Config, opts ...EngineOption) (*Engine, error) {
 		mediaEnabled = true
 	}
 
-	pipeline := storage.NewPipeline(relational, vector, media)
+	pipeline := storage.NewPipeline(relational, vector, media, logger)
+	if pipeline != nil {
+		closers = append(closers, pipeline.Close)
+	}
 
 	footprint := NewFootprint(cfg.Crawl.Footprint.MaxEntries, cfg.Crawl.Footprint.TTL.Duration, cfg.Crawl.Footprint.Enabled)
 	limiter := NewDomainLimiter(cfg.Crawl.PerDomainDelay.Duration, RateLimiterSettings{
@@ -491,7 +495,36 @@ func (e *Engine) emitEvent(evt ProgressEvent) {
 }
 
 func (e *Engine) handleRequest(ctx context.Context, req types.CrawlRequest) {
-	if ctx.Err() != nil || req.URL == nil {
+	if req.URL == nil {
+		e.reportPageProcessed(req)
+		return
+	}
+
+	reported := false
+	defer func() {
+		if r := recover(); r != nil {
+			var urlStr string
+			if req.URL != nil {
+				urlStr = req.URL.String()
+			}
+			if e.logger != nil {
+				args := []any{
+					"url", urlStr,
+					"depth", req.Depth,
+					"session_id", req.SessionID,
+					"run_id", req.RunID,
+					"error", r,
+					"stack", string(debug.Stack()),
+				}
+				e.logger.Error("panic while processing crawl request", args...)
+			}
+		}
+		if !reported {
+			e.reportPageProcessed(req)
+		}
+	}()
+
+	if ctx.Err() != nil {
 		return
 	}
 
@@ -645,6 +678,7 @@ func (e *Engine) handleRequest(ctx context.Context, req types.CrawlRequest) {
 	)
 
 	e.reportPageProcessed(req)
+	reported = true
 
 	if req.Depth >= req.MaxDepth {
 		return

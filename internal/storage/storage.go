@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	pq "github.com/lib/pq"
@@ -44,6 +46,7 @@ type Document struct {
 
 // ImageRecord tracks stored image metadata for persistence.
 type ImageRecord struct {
+	SessionID   string
 	PageURL     string
 	SourceURL   string
 	StoredPath  string
@@ -70,6 +73,7 @@ type ImageDocument struct {
 type RelationalStore interface {
 	SavePage(ctx context.Context, doc Document) error
 	SaveImages(ctx context.Context, images []ImageRecord) error
+	MarkPageNeedsIndex(ctx context.Context, sessionID, url string) error
 }
 
 // VectorStore persists embeddings into a vector database.
@@ -87,14 +91,36 @@ type Pipeline struct {
 	relational RelationalStore
 	vector     VectorStore
 	media      MediaStore
+
+	logger      *slog.Logger
+	vectorQueue chan Document
+	vectorWG    sync.WaitGroup
+	closeOnce   sync.Once
 }
 
+const (
+	defaultVectorQueueSize   = 128
+	defaultVectorWorkerCount = 4
+)
+
 // NewPipeline constructs a storage pipeline.
-func NewPipeline(rel RelationalStore, vec VectorStore, media MediaStore) *Pipeline {
+func NewPipeline(rel RelationalStore, vec VectorStore, media MediaStore, logger *slog.Logger) *Pipeline {
 	if rel == nil && vec == nil && media == nil {
 		return nil
 	}
-	return &Pipeline{relational: rel, vector: vec, media: media}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	p := &Pipeline{
+		relational: rel,
+		vector:     vec,
+		media:      media,
+		logger:     logger,
+	}
+	if vec != nil {
+		p.startVectorWorkers(defaultVectorWorkerCount, defaultVectorQueueSize)
+	}
+	return p
 }
 
 // Persist stores the crawl result in the configured sinks.
@@ -139,18 +165,21 @@ func (p *Pipeline) Persist(ctx context.Context, result types.CrawlResult) error 
 		delete(result.Metadata, "x_user_name")
 	}
 
+	indexable := false
 	if result.Processed != nil {
 		doc.CleanHTML = result.Processed.CleanHTML
 		doc.ExtractedText = result.Processed.ExtractedText
 		doc.Markdown = result.Processed.Markdown
-		doc.NeedsIndex = true
+		indexable = true
 		doc.ContentHash = computeContentFingerprint(doc.CleanHTML, doc.ExtractedText, doc.Markdown)
 	} else {
 		doc.ContentHash = computeContentFingerprint(doc.HTML, "", "")
 	}
+	doc.NeedsIndex = indexable && p.vector == nil
 
 	if p.relational != nil {
-		if err := p.relational.SavePage(ctx, doc); err != nil {
+		storeDoc := doc
+		if err := p.relational.SavePage(ctx, storeDoc); err != nil {
 			return fmt.Errorf("relational store: %w", err)
 		}
 	}
@@ -180,6 +209,7 @@ func (p *Pipeline) Persist(ctx context.Context, result types.CrawlResult) error 
 			img.Data = nil
 			if storedPath != "" {
 				record := ImageRecord{
+					SessionID:   doc.SessionID,
 					PageURL:     doc.URL,
 					SourceURL:   img.SourceURL,
 					StoredPath:  storedPath,
@@ -199,11 +229,104 @@ func (p *Pipeline) Persist(ctx context.Context, result types.CrawlResult) error 
 		}
 	}
 	if p.vector != nil {
-		if err := p.vector.UpsertEmbedding(ctx, doc); err != nil {
-			return fmt.Errorf("vector store: %w", err)
+		if indexable {
+			vectorDoc := doc
+			vectorDoc.NeedsIndex = true
+			p.enqueueVectorTask(vectorDoc)
 		}
 	}
 	return nil
+}
+
+// Close waits for background workers to finish draining queues.
+func (p *Pipeline) Close() error {
+	if p == nil {
+		return nil
+	}
+	p.closeOnce.Do(func() {
+		if p.vectorQueue != nil {
+			close(p.vectorQueue)
+		}
+	})
+	p.vectorWG.Wait()
+	return nil
+}
+
+func (p *Pipeline) startVectorWorkers(workers, queueSize int) {
+	if workers <= 0 {
+		workers = 1
+	}
+	if queueSize <= 0 {
+		queueSize = defaultVectorQueueSize
+	}
+	p.vectorQueue = make(chan Document, queueSize)
+	for i := 0; i < workers; i++ {
+		p.vectorWG.Add(1)
+		go p.runVectorWorker(i + 1)
+	}
+}
+
+func (p *Pipeline) runVectorWorker(workerID int) {
+	defer p.vectorWG.Done()
+	ctx := context.Background()
+	for doc := range p.vectorQueue {
+		if err := p.vector.UpsertEmbedding(ctx, doc); err != nil {
+			if p.logger != nil {
+				p.logger.Error("vector upsert failed",
+					"worker", workerID,
+					"session_id", doc.SessionID,
+					"url", doc.URL,
+					"error", err)
+			}
+			p.markIndexFailure(ctx, doc)
+		}
+	}
+}
+
+func (p *Pipeline) markIndexFailure(ctx context.Context, doc Document) {
+	if p == nil || p.relational == nil {
+		return
+	}
+	if doc.SessionID == "" || doc.URL == "" {
+		return
+	}
+	if err := p.relational.MarkPageNeedsIndex(ctx, doc.SessionID, doc.URL); err != nil && p.logger != nil {
+		p.logger.Error("failed to flag page for reindex",
+			"session_id", doc.SessionID,
+			"url", doc.URL,
+			"error", err)
+	}
+}
+
+func (p *Pipeline) enqueueVectorTask(doc Document) {
+	if p.vectorQueue == nil {
+		return
+	}
+	task := compactVectorDocument(doc)
+	select {
+	case p.vectorQueue <- task:
+	default:
+		if p.logger != nil {
+			p.logger.Warn("vector queue full; dropping document",
+				"session_id", doc.SessionID,
+				"url", doc.URL)
+		}
+	}
+}
+
+func compactVectorDocument(doc Document) Document {
+	return Document{
+		URL:           doc.URL,
+		FinalURL:      doc.FinalURL,
+		ExtractedText: doc.ExtractedText,
+		Markdown:      doc.Markdown,
+		Metadata:      doc.Metadata,
+		SessionID:     doc.SessionID,
+		ContentHash:   doc.ContentHash,
+		NeedsIndex:    doc.NeedsIndex,
+		UserID:        doc.UserID,
+		UserName:      doc.UserName,
+	}
 }
 
 // SQLWriter is a simple relational store example backed by database/sql.
@@ -307,9 +430,9 @@ func (s *SQLWriter) SaveImages(ctx context.Context, images []ImageRecord) error 
 		return nil
 	}
 	query := `
-        INSERT INTO images (page_url, source_url, stored_path, content_type, size_bytes, alt_text, width, height)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-        ON CONFLICT (page_url, source_url) DO UPDATE SET
+        INSERT INTO images (session_id, page_url, source_url, stored_path, content_type, size_bytes, alt_text, width, height)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        ON CONFLICT (session_id, page_url, source_url) DO UPDATE SET
             stored_path = EXCLUDED.stored_path,
             content_type = EXCLUDED.content_type,
             size_bytes = EXCLUDED.size_bytes,
@@ -319,7 +442,12 @@ func (s *SQLWriter) SaveImages(ctx context.Context, images []ImageRecord) error 
             updated_at = NOW()
     `
 	for _, img := range images {
+		sessionID := strings.TrimSpace(img.SessionID)
+		if sessionID == "" {
+			return fmt.Errorf("image record missing session id for page %s", img.PageURL)
+		}
 		if _, err := s.db.ExecContext(ctx, query,
+			sessionID,
 			img.PageURL,
 			img.SourceURL,
 			img.StoredPath,
@@ -336,6 +464,10 @@ func (s *SQLWriter) SaveImages(ctx context.Context, images []ImageRecord) error 
 }
 
 func (s *SQLWriter) upsertPage(ctx context.Context, doc Document) error {
+	sessionID := strings.TrimSpace(doc.SessionID)
+	if sessionID == "" {
+		return fmt.Errorf("missing session id for page %s", doc.URL)
+	}
 	var metadataJSON any
 	if len(doc.Metadata) > 0 {
 		encoded, err := json.Marshal(doc.Metadata)
@@ -358,7 +490,7 @@ func (s *SQLWriter) upsertPage(ctx context.Context, doc Document) error {
             $10,$11,$12,$13,$14,
             $15,$16,$17,$18
         )
-        ON CONFLICT (url) DO UPDATE SET
+        ON CONFLICT (session_id, url) DO UPDATE SET
             final_url = EXCLUDED.final_url,
             depth = EXCLUDED.depth,
             retrieved_at = EXCLUDED.retrieved_at,
@@ -372,7 +504,7 @@ func (s *SQLWriter) upsertPage(ctx context.Context, doc Document) error {
             run_id = EXCLUDED.run_id,
             tenant_id = EXCLUDED.tenant_id,
             seed_label = EXCLUDED.seed_label,
-            session_id = COALESCE(EXCLUDED.session_id, pages.session_id),
+            session_id = EXCLUDED.session_id,
             content_hash = EXCLUDED.content_hash,
             needs_index = CASE
                 WHEN pages.content_hash IS DISTINCT FROM EXCLUDED.content_hash THEN TRUE
@@ -398,7 +530,7 @@ func (s *SQLWriter) upsertPage(ctx context.Context, doc Document) error {
 		nullIfEmpty(doc.RunID),
 		nullIfEmpty(doc.TenantID),
 		nullIfEmpty(doc.SeedLabel),
-		nullIfEmpty(doc.SessionID),
+		sessionID,
 		nullIfEmpty(doc.ContentHash),
 		doc.NeedsIndex,
 		timeOrNil(doc.IndexedAt),
@@ -495,7 +627,8 @@ func (s *SQLWriter) ensureSchema(ctx context.Context) error {
 
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS pages (
-		    url TEXT PRIMARY KEY,
+		    session_id TEXT NOT NULL,
+		    url TEXT NOT NULL,
 		    final_url TEXT,
 		    depth INT,
 		    retrieved_at TIMESTAMPTZ,
@@ -509,10 +642,10 @@ func (s *SQLWriter) ensureSchema(ctx context.Context) error {
 		    run_id TEXT,
 		    tenant_id TEXT,
 		    seed_label TEXT,
-		    session_id TEXT,
 		    content_hash TEXT,
 		    needs_index BOOLEAN DEFAULT TRUE,
-		    indexed_at TIMESTAMPTZ
+		    indexed_at TIMESTAMPTZ,
+		    PRIMARY KEY (session_id, url)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_pages_retrieved_at ON pages (retrieved_at DESC)`,
 		`ALTER TABLE pages ADD COLUMN IF NOT EXISTS metadata JSONB`,
@@ -526,11 +659,15 @@ func (s *SQLWriter) ensureSchema(ctx context.Context) error {
 		`ALTER TABLE pages ADD COLUMN IF NOT EXISTS content_hash TEXT`,
 		`ALTER TABLE pages ADD COLUMN IF NOT EXISTS needs_index BOOLEAN DEFAULT TRUE`,
 		`ALTER TABLE pages ADD COLUMN IF NOT EXISTS indexed_at TIMESTAMPTZ`,
+		`UPDATE pages SET session_id = url WHERE (session_id IS NULL OR session_id = '')`,
+		`ALTER TABLE pages ALTER COLUMN session_id SET NOT NULL`,
+		`ALTER TABLE pages DROP CONSTRAINT IF EXISTS pages_pkey`,
+		`ALTER TABLE pages ADD CONSTRAINT pages_session_url_pkey PRIMARY KEY (session_id, url)`,
 		`CREATE INDEX IF NOT EXISTS idx_pages_session ON pages (session_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_pages_scraper_run ON pages (scraper_id, run_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_pages_session_url ON pages (session_id, url)`,
 		`CREATE TABLE IF NOT EXISTS images (
-		    page_url TEXT NOT NULL REFERENCES pages(url) ON DELETE CASCADE,
+		    session_id TEXT NOT NULL,
+		    page_url TEXT NOT NULL,
 		    source_url TEXT NOT NULL,
 		    stored_path TEXT NOT NULL,
 		    content_type TEXT,
@@ -540,9 +677,18 @@ func (s *SQLWriter) ensureSchema(ctx context.Context) error {
 		    height INT,
 		    created_at TIMESTAMPTZ DEFAULT NOW(),
 		    updated_at TIMESTAMPTZ DEFAULT NOW(),
-		    PRIMARY KEY (page_url, source_url)
+		    PRIMARY KEY (session_id, page_url, source_url),
+		    FOREIGN KEY (session_id, page_url) REFERENCES pages(session_id, url) ON DELETE CASCADE
 		)`,
-		`CREATE INDEX IF NOT EXISTS idx_images_page_url ON images (page_url)`,
+		`ALTER TABLE images ADD COLUMN IF NOT EXISTS session_id TEXT`,
+		`UPDATE images SET session_id = p.session_id FROM pages p WHERE (images.session_id IS NULL OR images.session_id = '') AND p.url = images.page_url`,
+		`ALTER TABLE images ALTER COLUMN session_id SET NOT NULL`,
+		`ALTER TABLE images DROP CONSTRAINT IF EXISTS images_pkey`,
+		`ALTER TABLE images ADD CONSTRAINT images_session_page_source_pkey PRIMARY KEY (session_id, page_url, source_url)`,
+		`ALTER TABLE images DROP CONSTRAINT IF EXISTS images_page_url_fkey`,
+		`ALTER TABLE images ADD CONSTRAINT images_page_fk FOREIGN KEY (session_id, page_url) REFERENCES pages(session_id, url) ON DELETE CASCADE`,
+		`DROP INDEX IF EXISTS idx_images_page_url`,
+		`CREATE INDEX IF NOT EXISTS idx_images_session_page ON images (session_id, page_url)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.ExecContext(schemaCtx, stmt); err != nil {

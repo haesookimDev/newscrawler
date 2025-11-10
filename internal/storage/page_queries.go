@@ -428,12 +428,12 @@ func (s *SQLWriter) FetchPagesNeedingIndex(ctx context.Context, sessionID string
 	candidates := make([]IndexCandidate, 0, limit)
 	for rows.Next() {
 		var (
-			url string
-			finalURL sql.NullString
-			markdown sql.NullString
-			extracted sql.NullString
+			url           string
+			finalURL      sql.NullString
+			markdown      sql.NullString
+			extracted     sql.NullString
 			metadataBytes []byte
-			contentHash sql.NullString
+			contentHash   sql.NullString
 		)
 		if err := rows.Scan(&url, &finalURL, &markdown, &extracted, &metadataBytes, &contentHash); err != nil {
 			return nil, fmt.Errorf("scan needs index: %w", err)
@@ -467,6 +467,22 @@ func (s *SQLWriter) MarkPageIndexed(ctx context.Context, sessionID, url string) 
 		WHERE session_id = $1 AND url = $2`
 	if _, err := s.db.ExecContext(ctx, query, sessionID, url); err != nil {
 		return fmt.Errorf("mark indexed: %w", err)
+	}
+	return nil
+}
+
+// MarkPageNeedsIndex flags a page for manual reindexing when automatic indexing fails.
+func (s *SQLWriter) MarkPageNeedsIndex(ctx context.Context, sessionID, url string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("sql store not initialised")
+	}
+	query := `
+		UPDATE pages
+		SET needs_index = TRUE,
+		    indexed_at = NULL
+		WHERE session_id = $1 AND url = $2`
+	if _, err := s.db.ExecContext(ctx, query, sessionID, url); err != nil {
+		return fmt.Errorf("mark needs index: %w", err)
 	}
 	return nil
 }

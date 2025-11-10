@@ -110,6 +110,16 @@ func (j *indexJob) progress(url string) {
 	j.mu.Lock()
 	j.processed++
 	j.current = url
+	j.message = ""
+	j.mu.Unlock()
+	j.broadcast("index_progress")
+}
+
+func (j *indexJob) progressWithMessage(url, message string) {
+	j.mu.Lock()
+	j.processed++
+	j.current = url
+	j.message = message
 	j.mu.Unlock()
 	j.broadcast("index_progress")
 }

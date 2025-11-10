@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -167,6 +168,76 @@ func (m *SessionManager) ListSessions() []SessionSummary {
 	return summaries
 }
 
+// EvictInactiveSessions persists and removes old, unused sessions to keep memory bounded.
+func (m *SessionManager) EvictInactiveSessions(maxInMemory int, idleAfter time.Duration) int {
+	if m == nil || maxInMemory <= 0 || m.stateStore == nil {
+		return 0
+	}
+
+	type candidate struct {
+		session    *Session
+		lastActive time.Time
+	}
+
+	now := time.Now()
+
+	m.mu.Lock()
+	current := len(m.sessions)
+	if current <= maxInMemory {
+		m.mu.Unlock()
+		return 0
+	}
+	candidates := make([]candidate, 0, current-maxInMemory)
+	for _, session := range m.sessions {
+		summary := session.Snapshot()
+		if summary.Status == SessionStatusRunning || summary.Status == SessionStatusCancelling {
+			continue
+		}
+		lastActive := summary.CreatedAt
+		if summary.CompletedAt != nil {
+			lastActive = *summary.CompletedAt
+		} else if summary.StartedAt != nil {
+			lastActive = *summary.StartedAt
+		}
+		if idleAfter > 0 && now.Sub(lastActive) < idleAfter {
+			continue
+		}
+		candidates = append(candidates, candidate{
+			session:    session,
+			lastActive: lastActive,
+		})
+	}
+	if len(candidates) == 0 {
+		m.mu.Unlock()
+		return 0
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].lastActive.Before(candidates[j].lastActive)
+	})
+
+	target := current - maxInMemory
+	if target < len(candidates) {
+		candidates = candidates[:target]
+	}
+
+	for _, c := range candidates {
+		delete(m.sessions, c.session.id)
+	}
+	m.mu.Unlock()
+
+	for _, c := range candidates {
+		m.persistSnapshot(c.session)
+	}
+
+	if len(candidates) > 0 && m.logger != nil {
+		m.logger.Info("evicted inactive sessions",
+			"count", len(candidates),
+			"max_resident", maxInMemory)
+	}
+	return len(candidates)
+}
+
 // GetSession returns the backing session by id.
 func (m *SessionManager) GetSession(id string) (*Session, bool) {
 	id = strings.ToLower(strings.TrimSpace(id))
@@ -179,21 +250,21 @@ func (m *SessionManager) GetSession(id string) (*Session, bool) {
 // GetSessionDetail captures the latest summary + config snapshot for a session.
 func (m *SessionManager) GetSessionDetail(id string) (SessionDetail, bool) {
 	session, ok := m.GetSession(id)
-		if !ok {
-			if m.stateStore != nil {
-				snap, found, err := m.stateStore.Get(m.rootCtx, id)
-				if err != nil && m.logger != nil {
-					m.logger.Warn("redis get session failed", "session_id", id, "error", err)
-				}
-				if err == nil && found {
-					return SessionDetail{
-						Session: snapshotToSummary(snap),
-						Config:  deepCopyConfig(m.baseConfig),
-					}, true
-				}
+	if !ok {
+		if m.stateStore != nil {
+			snap, found, err := m.stateStore.Get(m.rootCtx, id)
+			if err != nil && m.logger != nil {
+				m.logger.Warn("redis get session failed", "session_id", id, "error", err)
 			}
-			return SessionDetail{}, false
+			if err == nil && found {
+				return SessionDetail{
+					Session: snapshotToSummary(snap),
+					Config:  deepCopyConfig(m.baseConfig),
+				}, true
+			}
 		}
+		return SessionDetail{}, false
+	}
 	summary := session.Snapshot()
 	cfg := session.ConfigSnapshot()
 	return SessionDetail{
