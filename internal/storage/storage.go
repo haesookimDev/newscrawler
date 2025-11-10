@@ -89,6 +89,7 @@ type RelationalStore interface {
 	SavePage(ctx context.Context, doc Document) error
 	SaveImages(ctx context.Context, images []ImageRecord) error
 	MarkPageNeedsIndex(ctx context.Context, sessionID, url string) error
+	MarkPageIndexed(ctx context.Context, sessionID, url string) error
 }
 
 // ChunkStore persists chunk metadata for indexing.
@@ -128,6 +129,7 @@ type chunkTask struct {
 	UserID    string
 	UserName  string
 }
+
 const (
 	defaultVectorQueueSize   = 128
 	defaultVectorWorkerCount = 4
@@ -213,7 +215,7 @@ func (p *Pipeline) Persist(ctx context.Context, result types.CrawlResult) error 
 	} else {
 		doc.ContentHash = computeContentFingerprint(doc.HTML, "", "")
 	}
-	doc.NeedsIndex = indexable && (p.vector == nil)
+	doc.NeedsIndex = indexable
 
 	if p.relational != nil {
 		storeDoc := doc
@@ -346,6 +348,15 @@ func (p *Pipeline) runVectorWorker(workerID int) {
 				"session_id", task.SessionID,
 				"chunk_id", task.ChunkID,
 				"error", err)
+		}
+		if p.relational != nil {
+			if err := p.relational.MarkPageIndexed(ctx, chunk.SessionID, chunk.URL); err != nil && !errors.Is(err, sql.ErrNoRows) && p.logger != nil {
+				p.logger.Warn("mark page indexed failed after vector upsert",
+					"worker", workerID,
+					"session_id", chunk.SessionID,
+					"url", chunk.URL,
+					"error", err)
+			}
 		}
 	}
 }
