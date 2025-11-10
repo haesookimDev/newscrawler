@@ -156,7 +156,38 @@ func (s *SQLWriter) UpsertVectorCollection(ctx context.Context, record VectorCol
 	if s == nil || s.db == nil {
 		return fmt.Errorf("sql store not initialised")
 	}
-	query := `
+	makeName := strings.TrimSpace(record.CollectionMakeName)
+	if makeName == "" {
+		return fmt.Errorf("collection_make_name is required")
+	}
+	shareGroup := nullableString(record.ShareGroup)
+	updateQuery := `
+        UPDATE vector_db
+           SET description = $1,
+               vector_size = $2,
+               init_embedding_model = $3,
+               is_shared = $4,
+               share_group = $5,
+               share_permissions = $6
+         WHERE collection_make_name = $7`
+	updateArgs := []any{
+		record.Description,
+		record.VectorSize,
+		record.InitEmbeddingModel,
+		record.IsShared,
+		shareGroup,
+		record.SharePermissions,
+		makeName,
+	}
+	res, err := s.db.ExecContext(ctx, updateQuery, updateArgs...)
+	if err != nil {
+		return fmt.Errorf("update vector collection: %w", err)
+	}
+	if rows, _ := res.RowsAffected(); rows > 0 {
+		return nil
+	}
+
+	insertQuery := `
         INSERT INTO vector_db (
             user_id, collection_make_name, collection_name, description,
             registered_at, vector_size, init_embedding_model,
@@ -165,28 +196,21 @@ func (s *SQLWriter) UpsertVectorCollection(ctx context.Context, record VectorCol
             $1,$2,$3,$4,
             $5,$6,$7,
             $8,$9,$10
-        )
-        ON CONFLICT (collection_make_name) DO UPDATE SET
-            description = EXCLUDED.description,
-            vector_size = EXCLUDED.vector_size,
-            init_embedding_model = EXCLUDED.init_embedding_model,
-            is_shared = EXCLUDED.is_shared,
-            share_group = EXCLUDED.share_group,
-            share_permissions = EXCLUDED.share_permissions`
-	_, err := s.db.ExecContext(ctx, query,
+        )`
+	insertArgs := []any{
 		nullableInt64(record.UserID),
-		strings.TrimSpace(record.CollectionMakeName),
+		makeName,
 		strings.TrimSpace(record.CollectionName),
 		record.Description,
 		record.RegisteredAt,
 		record.VectorSize,
 		record.InitEmbeddingModel,
 		record.IsShared,
-		nullableString(record.ShareGroup),
+		shareGroup,
 		record.SharePermissions,
-	)
-	if err != nil {
-		return fmt.Errorf("upsert vector collection: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, insertQuery, insertArgs...); err != nil {
+		return fmt.Errorf("insert vector collection: %w", err)
 	}
 	return nil
 }
