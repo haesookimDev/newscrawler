@@ -108,3 +108,43 @@ func TestResolveVectorConfigFallbackToBaseConfig(t *testing.T) {
 		t.Fatalf("unexpected vector config: %#v", cfg)
 	}
 }
+
+func TestPopulateEmbeddingMetadataDoesNotOverrideVectorProvider(t *testing.T) {
+	t.Helper()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/embedding/config-status" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		if r.Header.Get("X-User-ID") == "" || r.Header.Get("X-User-Name") == "" {
+			t.Fatalf("missing auth headers")
+		}
+		io.WriteString(w, `{
+			"provider_info": {
+				"provider": "openai",
+				"model": "text-embedding-3-large",
+				"dimension": 1536
+			}
+		}`)
+	}))
+	defer ts.Close()
+	t.Setenv("XGEN_EMBEDDING_BASE_URL", ts.URL)
+
+	server := &Server{}
+	cfg := config.VectorDBConfig{
+		Provider: "qdrant",
+		Endpoint: "http://qdrant:6333",
+	}
+	err := server.populateEmbeddingMetadata(context.Background(), &cfg, "user-1", "alice")
+	if err != nil {
+		t.Fatalf("populateEmbeddingMetadata returned error: %v", err)
+	}
+	if cfg.Provider != "qdrant" {
+		t.Fatalf("expected provider to remain qdrant, got %s", cfg.Provider)
+	}
+	if cfg.Dimension != 1536 {
+		t.Fatalf("expected dimension 1536, got %d", cfg.Dimension)
+	}
+	if cfg.EmbeddingModel != "text-embedding-3-large" {
+		t.Fatalf("expected embedding model updated, got %s", cfg.EmbeddingModel)
+	}
+}

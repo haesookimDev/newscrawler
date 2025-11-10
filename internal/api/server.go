@@ -857,6 +857,7 @@ func (s *Server) populateEmbeddingMetadata(ctx context.Context, cfg *config.Vect
 	if cfg == nil {
 		return fmt.Errorf("vector config missing")
 	}
+	originalProvider := strings.TrimSpace(cfg.Provider)
 	info, err := s.fetchEmbeddingConfig(ctx, userID, userName)
 	if err != nil {
 		return err
@@ -868,7 +869,7 @@ func (s *Server) populateEmbeddingMetadata(ctx context.Context, cfg *config.Vect
 	if model := strings.TrimSpace(info.ProviderInfo.Model); model != "" {
 		cfg.EmbeddingModel = model
 	}
-	if provider := strings.TrimSpace(info.ProviderInfo.Provider); provider != "" {
+	if provider := strings.TrimSpace(info.ProviderInfo.Provider); provider != "" && originalProvider == "" {
 		cfg.Provider = provider
 	}
 	return nil
