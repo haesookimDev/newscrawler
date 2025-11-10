@@ -66,6 +66,18 @@ func (fakePageStore) MarkPageDocumentIntegrated(ctx context.Context, sessionID, 
 	return nil
 }
 
+func (fakePageStore) CountChunksNeedingIndex(ctx context.Context, sessionID string) (int64, error) {
+	return 0, nil
+}
+
+func (fakePageStore) FetchChunksNeedingIndex(ctx context.Context, sessionID string, limit int) ([]storage.ChunkIndexCandidate, error) {
+	return nil, nil
+}
+
+func (fakePageStore) MarkChunkIndexed(ctx context.Context, sessionID, chunkID string) error {
+	return nil
+}
+
 func (fakePageStore) DeleteSessionData(ctx context.Context, sessionID string) error {
 	return nil
 }

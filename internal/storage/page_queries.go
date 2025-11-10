@@ -80,6 +80,16 @@ type IndexCandidate struct {
 	ContentHash   string
 }
 
+// ChunkIndexCandidate represents a chunk ready for indexing.
+type ChunkIndexCandidate struct {
+	ChunkID     string
+	SessionID   string
+	URL         string
+	ChunkText   string
+	Metadata    map[string]string
+	ContentHash string
+}
+
 // PageDetail extends summary with full content.
 type PageDetail struct {
 	PageSummary
@@ -636,6 +646,87 @@ func parseMetadata(data []byte) map[string]string {
 		return map[string]string{}
 	}
 	return meta
+}
+
+// CountChunksNeedingIndex reports the number of chunks pending indexing for a session.
+func (s *SQLWriter) CountChunksNeedingIndex(ctx context.Context, sessionID string) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, fmt.Errorf("sql store not initialised")
+	}
+	var total int64
+	if err := s.db.QueryRowContext(ctx, `
+        SELECT COUNT(*) FROM page_chunks
+        WHERE session_id = $1 AND needs_index = TRUE`, sessionID).Scan(&total); err != nil {
+		return 0, fmt.Errorf("count chunk needs index: %w", err)
+	}
+	return total, nil
+}
+
+// FetchChunksNeedingIndex returns a batch of chunks requiring indexing.
+func (s *SQLWriter) FetchChunksNeedingIndex(ctx context.Context, sessionID string, limit int) ([]ChunkIndexCandidate, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("sql store not initialised")
+	}
+	if limit <= 0 {
+		limit = 32
+	}
+	rows, err := s.db.QueryContext(ctx, `
+        SELECT chunk_id, url, chunk_text, metadata, content_hash
+        FROM page_chunks
+        WHERE session_id = $1 AND needs_index = TRUE
+        ORDER BY updated_at ASC
+        LIMIT $2`, sessionID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("fetch chunks needing index: %w", err)
+	}
+	defer rows.Close()
+
+	chunks := make([]ChunkIndexCandidate, 0, limit)
+	for rows.Next() {
+		var (
+			chunkID      string
+			url          sql.NullString
+			chunkText    sql.NullString
+			metadataJSON []byte
+			contentHash  sql.NullString
+		)
+		if err := rows.Scan(&chunkID, &url, &chunkText, &metadataJSON, &contentHash); err != nil {
+			return nil, fmt.Errorf("scan chunk needing index: %w", err)
+		}
+		chunk := ChunkIndexCandidate{
+			ChunkID:     chunkID,
+			SessionID:   sessionID,
+			URL:         url.String,
+			ChunkText:   chunkText.String,
+			Metadata:    parseMetadata(metadataJSON),
+			ContentHash: contentHash.String,
+		}
+		chunks = append(chunks, chunk)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return chunks, nil
+}
+
+// MarkChunkIndexed marks a chunk as indexed.
+func (s *SQLWriter) MarkChunkIndexed(ctx context.Context, sessionID, chunkID string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("sql store not initialised")
+	}
+	result, err := s.db.ExecContext(ctx, `
+        UPDATE page_chunks
+           SET needs_index = FALSE,
+               indexed_at = NOW(),
+               updated_at = NOW()
+         WHERE session_id = $1 AND chunk_id = $2`, sessionID, chunkID)
+	if err != nil {
+		return fmt.Errorf("mark chunk indexed: %w", err)
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func parseSize(value string) int64 {

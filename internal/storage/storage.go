@@ -45,6 +45,18 @@ type Document struct {
 	UserName             string
 }
 
+// ChunkRecord captures chunk metadata used for indexing.
+type ChunkRecord struct {
+	SessionID   string
+	URL         string
+	ChunkID     string
+	ChunkText   string
+	Metadata    map[string]string
+	ContentHash string
+	NeedsIndex  bool
+	IndexedAt   *time.Time
+}
+
 // ImageRecord tracks stored image metadata for persistence.
 type ImageRecord struct {
 	SessionID   string
@@ -77,6 +89,11 @@ type RelationalStore interface {
 	MarkPageNeedsIndex(ctx context.Context, sessionID, url string) error
 }
 
+// ChunkStore persists chunk metadata for indexing.
+type ChunkStore interface {
+	SaveChunk(ctx context.Context, chunk ChunkRecord) error
+}
+
 // VectorStore persists embeddings into a vector database.
 type VectorStore interface {
 	UpsertEmbedding(ctx context.Context, doc Document) error
@@ -93,6 +110,7 @@ type Pipeline struct {
 	relational RelationalStore
 	vector     VectorStore
 	media      MediaStore
+	chunks     ChunkStore
 
 	logger      *slog.Logger
 	vectorQueue chan Document
@@ -117,7 +135,11 @@ func NewPipeline(rel RelationalStore, vec VectorStore, media MediaStore, logger 
 		relational: rel,
 		vector:     vec,
 		media:      media,
+		chunks:     nil,
 		logger:     logger,
+	}
+	if chunkStore, ok := rel.(ChunkStore); ok {
+		p.chunks = chunkStore
 	}
 	if vec != nil {
 		p.startVectorWorkers(defaultVectorWorkerCount, defaultVectorQueueSize)
@@ -183,6 +205,15 @@ func (p *Pipeline) Persist(ctx context.Context, result types.CrawlResult) error 
 		storeDoc := doc
 		if err := p.relational.SavePage(ctx, storeDoc); err != nil {
 			return fmt.Errorf("relational store: %w", err)
+		}
+	}
+	if p.chunks != nil && doc.NeedsIndex {
+		chunk := buildChunkRecord(doc)
+		if err := p.chunks.SaveChunk(ctx, chunk); err != nil && p.logger != nil {
+			p.logger.Error("save chunk failed",
+				"session_id", doc.SessionID,
+				"url", doc.URL,
+				"error", err)
 		}
 	}
 
@@ -331,6 +362,24 @@ func compactVectorDocument(doc Document) Document {
 	}
 }
 
+func buildChunkRecord(doc Document) ChunkRecord {
+	text := strings.TrimSpace(doc.Markdown)
+	if text == "" {
+		text = strings.TrimSpace(doc.ExtractedText)
+	}
+	chunkID := GeneratePointID(doc.ContentHash, doc.URL)
+	return ChunkRecord{
+		SessionID:   doc.SessionID,
+		URL:         doc.URL,
+		ChunkID:     chunkID,
+		ChunkText:   text,
+		Metadata:    doc.Metadata,
+		ContentHash: doc.ContentHash,
+		NeedsIndex:  doc.NeedsIndex,
+		IndexedAt:   doc.IndexedAt,
+	}
+}
+
 // SQLWriter is a simple relational store example backed by database/sql.
 type SQLWriter struct {
 	db          *sql.DB
@@ -403,6 +452,60 @@ func (s *SQLWriter) SavePage(ctx context.Context, doc Document) error {
 			return nil
 		}
 		return fmt.Errorf("insert page: %w", err)
+	}
+	return nil
+}
+
+// SaveChunk upserts chunk metadata used for indexing.
+func (s *SQLWriter) SaveChunk(ctx context.Context, chunk ChunkRecord) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	sessionID := strings.TrimSpace(chunk.SessionID)
+	if sessionID == "" || strings.TrimSpace(chunk.ChunkID) == "" {
+		return fmt.Errorf("missing session_id or chunk_id for chunk %s", chunk.URL)
+	}
+	var metadataJSON any
+	if len(chunk.Metadata) > 0 {
+		encoded, err := json.Marshal(chunk.Metadata)
+		if err != nil {
+			return fmt.Errorf("marshal chunk metadata: %w", err)
+		}
+		metadataJSON = string(encoded)
+	}
+	query := `
+        INSERT INTO page_chunks (
+            session_id, chunk_id, url, chunk_text, metadata,
+            content_hash, needs_index, indexed_at, updated_at
+        ) VALUES (
+            $1,$2,$3,$4,$5,
+            $6,$7,$8,NOW()
+        )
+        ON CONFLICT (session_id, chunk_id) DO UPDATE SET
+            url = EXCLUDED.url,
+            chunk_text = EXCLUDED.chunk_text,
+            metadata = EXCLUDED.metadata,
+            content_hash = EXCLUDED.content_hash,
+            needs_index = CASE
+                WHEN page_chunks.content_hash IS DISTINCT FROM EXCLUDED.content_hash THEN TRUE
+                ELSE EXCLUDED.needs_index
+            END,
+            indexed_at = CASE
+                WHEN page_chunks.content_hash IS DISTINCT FROM EXCLUDED.content_hash THEN NULL
+                ELSE EXCLUDED.indexed_at
+            END,
+            updated_at = NOW()`
+	if _, err := s.db.ExecContext(ctx, query,
+		sessionID,
+		strings.TrimSpace(chunk.ChunkID),
+		chunk.URL,
+		nullIfEmpty(chunk.ChunkText),
+		metadataJSON,
+		nullIfEmpty(chunk.ContentHash),
+		chunk.NeedsIndex,
+		timeOrNil(chunk.IndexedAt),
+	); err != nil {
+		return fmt.Errorf("save chunk: %w", err)
 	}
 	return nil
 }
@@ -683,6 +786,20 @@ func (s *SQLWriter) ensureSchema(ctx context.Context) error {
 		`ALTER TABLE pages ADD CONSTRAINT pages_session_url_pkey PRIMARY KEY (session_id, url)`,
 		`CREATE INDEX IF NOT EXISTS idx_pages_session ON pages (session_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_pages_scraper_run ON pages (scraper_id, run_id)`,
+		`CREATE TABLE IF NOT EXISTS page_chunks (
+		    session_id TEXT NOT NULL,
+		    chunk_id TEXT NOT NULL,
+		    url TEXT NOT NULL,
+		    chunk_text TEXT,
+		    metadata JSONB,
+		    content_hash TEXT,
+		    needs_index BOOLEAN DEFAULT TRUE,
+		    indexed_at TIMESTAMPTZ,
+		    created_at TIMESTAMPTZ DEFAULT NOW(),
+		    updated_at TIMESTAMPTZ DEFAULT NOW(),
+		    PRIMARY KEY (session_id, chunk_id)
+		)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_page_chunks_chunk_id ON page_chunks (chunk_id)`,
 		`CREATE TABLE IF NOT EXISTS images (
 		    session_id TEXT NOT NULL,
 		    page_url TEXT NOT NULL,

@@ -40,6 +40,9 @@ type PageStore interface {
 	MarkPageIndexed(ctx context.Context, sessionID, url string) error
 	FetchPagesReadyForDocumentSync(ctx context.Context, sessionID string, limit int) ([]storage.DocumentSyncCandidate, error)
 	MarkPageDocumentIntegrated(ctx context.Context, sessionID, url string) error
+	CountChunksNeedingIndex(ctx context.Context, sessionID string) (int64, error)
+	FetchChunksNeedingIndex(ctx context.Context, sessionID string, limit int) ([]storage.ChunkIndexCandidate, error)
+	MarkChunkIndexed(ctx context.Context, sessionID, chunkID string) error
 	DeleteSessionData(ctx context.Context, sessionID string) error
 }
 
@@ -512,10 +515,10 @@ func (s *Server) startIndexJob(w http.ResponseWriter, r *http.Request, sessionID
 		batchSize = defaultIndexBatchSize
 	}
 
-	total, err := s.pageStore.CountPagesNeedingIndex(r.Context(), sessionID)
+	total, err := s.pageStore.CountChunksNeedingIndex(r.Context(), sessionID)
 	if err != nil {
 		if s.logger != nil {
-			s.logger.Error("count needs_index failed", "session_id", sessionID, "error", err)
+			s.logger.Error("count chunk needs_index failed", "session_id", sessionID, "error", err)
 		}
 		http.Error(w, "failed to count pending pages", http.StatusInternalServerError)
 		return
@@ -568,10 +571,10 @@ func (s *Server) getIndexJobStatus(w http.ResponseWriter, r *http.Request, sessi
 		writeJSON(w, http.StatusOK, job.snapshot("index_status"))
 		return
 	}
-	total, err := s.pageStore.CountPagesNeedingIndex(r.Context(), sessionID)
+	total, err := s.pageStore.CountChunksNeedingIndex(r.Context(), sessionID)
 	if err != nil {
 		if s.logger != nil {
-			s.logger.Error("count needs_index failed", "session_id", sessionID, "error", err)
+			s.logger.Error("count chunk needs_index failed", "session_id", sessionID, "error", err)
 		}
 		http.Error(w, "failed to count pending pages", http.StatusInternalServerError)
 		return
@@ -850,17 +853,17 @@ func (s *Server) runIndexJob(job *indexJob, vectorCfg config.VectorDBConfig, bat
 			job.cancelWithReason("index job cancelled")
 			return
 		}
-		candidates, err := s.pageStore.FetchPagesNeedingIndex(ctx, job.sessionID, batchSize)
+		chunks, err := s.pageStore.FetchChunksNeedingIndex(ctx, job.sessionID, batchSize)
 		if err != nil {
-			s.failIndexJob(job, fmt.Errorf("fetch pages needing index: %w", err))
+			s.failIndexJob(job, fmt.Errorf("fetch chunks needing index: %w", err))
 			return
 		}
-		pending := make([]storage.IndexCandidate, 0, len(candidates))
-		for _, candidate := range candidates {
-			if _, seen := processed[candidate.URL]; seen {
+		pending := make([]storage.ChunkIndexCandidate, 0, len(chunks))
+		for _, chunk := range chunks {
+			if _, seen := processed[chunk.ChunkID]; seen {
 				continue
 			}
-			pending = append(pending, candidate)
+			pending = append(pending, chunk)
 		}
 		if len(pending) == 0 {
 			job.complete()
@@ -870,50 +873,47 @@ func (s *Server) runIndexJob(job *indexJob, vectorCfg config.VectorDBConfig, bat
 			return
 		}
 
-		for _, candidate := range pending {
+		for _, chunk := range pending {
 			if err := ctx.Err(); err != nil {
 				job.cancelWithReason("index job cancelled")
 				return
 			}
-			processed[candidate.URL] = struct{}{}
-			url := candidate.URL
-			markdown := strings.TrimSpace(candidate.Markdown)
-			if markdown == "" {
+			processed[chunk.ChunkID] = struct{}{}
+			text := strings.TrimSpace(chunk.ChunkText)
+			if text == "" {
 				if s.logger != nil {
-					s.logger.Warn("skipping page without markdown for indexing",
+					s.logger.Warn("skipping chunk without text for indexing",
 						"session_id", job.sessionID,
-						"url", url)
+						"chunk_id", chunk.ChunkID,
+						"url", chunk.URL)
 				}
-				if err := s.pageStore.MarkPageIndexed(ctx, job.sessionID, url); err != nil {
-					s.failIndexJob(job, fmt.Errorf("mark page indexed: %w", err))
+				if err := s.pageStore.MarkChunkIndexed(ctx, job.sessionID, chunk.ChunkID); err != nil {
+					s.failIndexJob(job, fmt.Errorf("mark chunk indexed: %w", err))
 					return
 				}
-				job.progress(url)
+				job.progress(chunk.URL)
 				continue
 			}
 
-			doc := storage.Document{
-				URL:           url,
-				FinalURL:      candidate.FinalURL,
-				Markdown:      candidate.Markdown,
-				ExtractedText: candidate.ExtractedText,
-				Metadata:      candidate.Metadata,
-				SessionID:     job.sessionID,
-				ContentHash:   candidate.ContentHash,
-				NeedsIndex:    true,
-				UserID:        userID,
-				UserName:      userName,
-			}
+			doc := chunkToVectorDocument(chunk, userID, userName)
 
 			if err := vectorStore.UpsertEmbedding(ctx, doc); err != nil {
-				s.handleIndexCandidateFailure(job, url, err)
+				s.handleIndexCandidateFailure(job, chunk.URL, err)
 				continue
 			}
-			if err := s.pageStore.MarkPageIndexed(ctx, job.sessionID, url); err != nil {
-				s.failIndexJob(job, fmt.Errorf("mark page indexed: %w", err))
+			if err := s.pageStore.MarkChunkIndexed(ctx, job.sessionID, chunk.ChunkID); err != nil {
+				s.failIndexJob(job, fmt.Errorf("mark chunk indexed: %w", err))
 				return
 			}
-			job.progress(url)
+			if err := s.pageStore.MarkPageIndexed(ctx, job.sessionID, chunk.URL); err != nil && !errors.Is(err, sql.ErrNoRows) {
+				if s.logger != nil {
+					s.logger.Warn("mark page indexed for chunk failed",
+						"session_id", job.sessionID,
+						"url", chunk.URL,
+						"error", err)
+				}
+			}
+			job.progress(chunk.URL)
 		}
 	}
 }
@@ -1156,6 +1156,20 @@ func (s *Server) fetchEmbeddingConfig(ctx context.Context, userID, userName stri
 		return embeddingConfigResponse{}, fmt.Errorf("decode embedding config: %w", err)
 	}
 	return parsed, nil
+}
+
+func chunkToVectorDocument(chunk storage.ChunkIndexCandidate, userID, userName string) storage.Document {
+	return storage.Document{
+		URL:         chunk.URL,
+		FinalURL:    chunk.URL,
+		Markdown:    chunk.ChunkText,
+		Metadata:    chunk.Metadata,
+		SessionID:   chunk.SessionID,
+		ContentHash: chunk.ContentHash,
+		NeedsIndex:  true,
+		UserID:      userID,
+		UserName:    userName,
+	}
 }
 
 func parseUserIDPointer(raw string) *int64 {
