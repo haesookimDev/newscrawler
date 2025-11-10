@@ -177,6 +177,37 @@ paths:
           $ref: '#/components/responses/NotFound'
         '405':
           $ref: '#/components/responses/MethodNotAllowed'
+  /api/crawler/sessions/{session_id}/documents:
+    parameters:
+      - $ref: '#/components/parameters/SessionId'
+    post:
+      summary: Sync indexed pages into the document database
+      operationId: syncSessionDocuments
+      description: >
+        Copies all pages with completed vector indexing into the chat document database. Requires
+        `X-User-ID` and `X-User-Name` headers for downstream authorization. Runs synchronously in
+        batches until no eligible pages remain.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DocumentSyncRequest'
+      responses:
+        '200':
+          description: Document sync completed (or no work needed).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentSyncResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '412':
+          description: Missing vector database configuration.
+        '502':
+          description: Failed to communicate with the embedding or document stores.
   /api/crawler/sessions/{session_id}/pages:
     get:
       summary: List crawled pages
@@ -407,6 +438,38 @@ components:
           type: integer
           minimum: 1
           description: Overrides the batch size (defaults to vector_db.upsert_batch_size or 32).
+    DocumentSyncRequest:
+      type: object
+      description: >
+        Optional overrides when syncing indexed pages into the chat document database. Provide `vector_db`
+        if the session was launched without vector settings or to override embedding metadata.
+      properties:
+        vector_db:
+          $ref: '#/components/schemas/VectorDBRequest'
+        batch_size:
+          type: integer
+          minimum: 1
+          description: Overrides the per-batch sync size (defaults to vector_db.upsert_batch_size or 64).
+    DocumentSyncResponse:
+      type: object
+      properties:
+        session_id:
+          type: string
+        collection_name:
+          type: string
+        collection_make_name:
+          type: string
+        integrated_documents:
+          type: integer
+          minimum: 0
+        status:
+          type: string
+          enum:
+            - completed
+            - idle
+        timestamp:
+          type: string
+          format: date-time
     RateLimitRequest:
       type: object
       properties:

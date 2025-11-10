@@ -113,6 +113,12 @@ type SSEEvent struct {
 
 // StartIndexRequest triggers vector indexing for an existing session.
 type StartIndexRequest struct {
-	VectorDB *VectorDBRequest `json:"vector_db,omitempty"`
-	BatchSize int            `json:"batch_size,omitempty"`
+	VectorDB  *VectorDBRequest `json:"vector_db,omitempty"`
+	BatchSize int              `json:"batch_size,omitempty"`
+}
+
+// DocumentSyncRequest triggers persistence of indexed pages into the shared document database.
+type DocumentSyncRequest struct {
+	VectorDB  *VectorDBRequest `json:"vector_db,omitempty"`
+	BatchSize int              `json:"batch_size,omitempty"`
 }

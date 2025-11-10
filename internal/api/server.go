@@ -15,15 +15,18 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"xgen-crawler/internal/config"
 	"xgen-crawler/internal/storage"
 )
 
 const (
-	maxResidentSessions       = 128
-	sessionEvictionInterval   = time.Minute
-	sessionEvictionIdleWindow = 15 * time.Minute
+	maxResidentSessions          = 128
+	sessionEvictionInterval      = time.Minute
+	sessionEvictionIdleWindow    = 15 * time.Minute
+	defaultDocumentSyncBatchSize = 64
+	crawlerDocumentType          = "crawler_page"
 )
 
 // Server exposes the HTTP API for managing crawler sessions.
@@ -223,6 +226,16 @@ func (s *Server) handleSessionByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.NotFound(w, r)
+	case "documents":
+		if len(parts) != 2 {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, r, http.MethodPost)
+			return
+		}
+		s.syncSessionDocuments(w, r, sessionID)
 	default:
 		http.NotFound(w, r)
 	}
@@ -477,6 +490,10 @@ func (s *Server) startIndexJob(w http.ResponseWriter, r *http.Request, sessionID
 		http.Error(w, "failed to load embedding configuration", http.StatusBadGateway)
 		return
 	}
+	if vectorCfg.Dimension <= 0 {
+		http.Error(w, "vector_db configuration missing embedding dimension", http.StatusPreconditionFailed)
+		return
+	}
 
 	if !vectorConfigComplete(vectorCfg) {
 		http.Error(w, "vector_db configuration incomplete; provider and endpoint are required", http.StatusPreconditionFailed)
@@ -598,6 +615,145 @@ func (s *Server) streamIndexEvents(w http.ResponseWriter, r *http.Request, sessi
 			return
 		}
 	}
+}
+
+func (s *Server) syncSessionDocuments(w http.ResponseWriter, r *http.Request, sessionID string) {
+	if s.pageStore == nil {
+		http.Error(w, "page store not configured", http.StatusNotImplemented)
+		return
+	}
+	docStore, ok := s.pageStore.(storage.DocumentSyncStore)
+	if !ok {
+		http.Error(w, "document sync not supported", http.StatusNotImplemented)
+		return
+	}
+	userID := strings.TrimSpace(r.Header.Get("X-User-ID"))
+	userName := strings.TrimSpace(r.Header.Get("X-User-Name"))
+	if userID == "" || userName == "" {
+		http.Error(w, "missing X-User-ID or X-User-Name header", http.StatusBadRequest)
+		return
+	}
+	var req DocumentSyncRequest
+	if r.Body != nil {
+		defer r.Body.Close()
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			http.Error(w, fmt.Sprintf("invalid json payload: %v", err), http.StatusBadRequest)
+			return
+		}
+	}
+	vectorCfg, ok := s.resolveVectorConfig(sessionID, req.VectorDB)
+	if !ok {
+		http.Error(w, "vector_db configuration missing; provide overrides or configure defaults for this session", http.StatusPreconditionFailed)
+		return
+	}
+	if err := s.populateEmbeddingMetadata(r.Context(), &vectorCfg, userID, userName); err != nil {
+		if s.logger != nil {
+			s.logger.Error("embedding metadata fetch failed",
+				"session_id", sessionID,
+				"error", err)
+		}
+		http.Error(w, "failed to load embedding configuration", http.StatusBadGateway)
+		return
+	}
+	batchSize := req.BatchSize
+	if batchSize <= 0 {
+		batchSize = vectorCfg.UpsertBatchSize
+	}
+	if batchSize <= 0 {
+		batchSize = defaultDocumentSyncBatchSize
+	}
+	collectionMakeName, collectionName := deriveCollectionIdentifiers(sessionID, vectorCfg)
+	userIDPtr := parseUserIDPointer(userID)
+	collectionRecord := storage.VectorCollectionRecord{
+		UserID:             userIDPtr,
+		CollectionMakeName: collectionMakeName,
+		CollectionName:     collectionName,
+		Description:        fmt.Sprintf("Crawled pages for session %s", sessionID),
+		RegisteredAt:       time.Now().UTC(),
+		VectorSize:         vectorCfg.Dimension,
+		InitEmbeddingModel: strings.TrimSpace(vectorCfg.EmbeddingModel),
+		IsShared:           false,
+		SharePermissions:   "read",
+	}
+	ctx := r.Context()
+	if err := docStore.UpsertVectorCollection(ctx, collectionRecord); err != nil {
+		if s.logger != nil {
+			s.logger.Error("vector collection upsert failed",
+				"session_id", sessionID,
+				"collection", collectionName,
+				"error", err)
+		}
+		http.Error(w, "failed to prepare collection", http.StatusBadGateway)
+		return
+	}
+	if s.logger != nil {
+		s.logger.Info("document sync started",
+			"session_id", sessionID,
+			"collection", collectionName,
+			"batch_size", batchSize)
+	}
+	integrated := 0
+	for {
+		if err := ctx.Err(); err != nil {
+			http.Error(w, "request cancelled", http.StatusRequestTimeout)
+			return
+		}
+		candidates, err := docStore.FetchPagesReadyForDocumentSync(ctx, sessionID, batchSize)
+		if err != nil {
+			if s.logger != nil {
+				s.logger.Error("fetch pages for document sync failed",
+					"session_id", sessionID,
+					"error", err)
+			}
+			http.Error(w, "failed to load pages for document sync", http.StatusInternalServerError)
+			return
+		}
+		if len(candidates) == 0 {
+			break
+		}
+		for _, candidate := range candidates {
+			chunk := buildChunkRecord(candidate, collectionName, userIDPtr, vectorCfg)
+			if err := docStore.UpsertVectorChunk(ctx, chunk); err != nil {
+				if s.logger != nil {
+					s.logger.Error("vector chunk upsert failed",
+						"session_id", sessionID,
+						"url", candidate.URL,
+						"error", err)
+				}
+				http.Error(w, "failed to store document chunk", http.StatusBadGateway)
+				return
+			}
+			if err := docStore.MarkPageDocumentIntegrated(ctx, sessionID, candidate.URL); err != nil {
+				if s.logger != nil {
+					s.logger.Error("mark document integrated failed",
+						"session_id", sessionID,
+						"url", candidate.URL,
+						"error", err)
+				}
+				http.Error(w, "failed to record document integration", http.StatusInternalServerError)
+				return
+			}
+			integrated++
+		}
+	}
+	status := "completed"
+	if integrated == 0 {
+		status = "idle"
+	}
+	if s.logger != nil {
+		s.logger.Info("document sync finished",
+			"session_id", sessionID,
+			"collection", collectionName,
+			"integrated", integrated)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"session_id":           sessionID,
+		"collection_name":      collectionName,
+		"collection_make_name": collectionMakeName,
+		"integrated_documents": integrated,
+		"status":               status,
+		"timestamp":            time.Now().UTC(),
+	})
 }
 
 func (s *Server) handleAllPages(w http.ResponseWriter, r *http.Request) {
@@ -997,4 +1153,140 @@ func (s *Server) fetchEmbeddingConfig(ctx context.Context, userID, userName stri
 		return embeddingConfigResponse{}, fmt.Errorf("decode embedding config: %w", err)
 	}
 	return parsed, nil
+}
+
+func parseUserIDPointer(raw string) *int64 {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	if v, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil {
+		return &v
+	}
+	return nil
+}
+
+func deriveCollectionIdentifiers(sessionID string, cfg config.VectorDBConfig) (string, string) {
+	cleanSession := strings.TrimSpace(sessionID)
+	if cleanSession == "" {
+		cleanSession = "crawler-session"
+	}
+	makeName := fmt.Sprintf("crawler-%s", cleanSession)
+	if idx := strings.TrimSpace(cfg.Index); idx != "" {
+		makeName = fmt.Sprintf("%s-%s", idx, cleanSession)
+	}
+	collectionName := cleanSession
+	if ns := strings.TrimSpace(cfg.Namespace); ns != "" {
+		collectionName = fmt.Sprintf("%s-%s", ns, cleanSession)
+	}
+	return makeName, collectionName
+}
+
+func buildChunkRecord(candidate storage.DocumentSyncCandidate, collectionName string, userID *int64, cfg config.VectorDBConfig) storage.VectorChunkRecord {
+	meta := candidate.Metadata
+	chunkText := strings.TrimSpace(candidate.Markdown)
+	if chunkText == "" {
+		chunkText = strings.TrimSpace(candidate.ExtractedText)
+	}
+	if chunkText == "" {
+		chunkText = firstNonEmptyMeta(meta, "summary", "description")
+	}
+	if chunkText == "" {
+		chunkText = candidate.URL
+	}
+	summary := firstNonEmptyMeta(meta, "summary", "description")
+	keywords := splitMetadataList(meta, "keywords", "tags")
+	topics := splitMetadataList(meta, "topics")
+	entities := splitMetadataList(meta, "entities")
+	concepts := splitMetadataList(meta, "main_concepts")
+	sentiment := firstNonEmptyMeta(meta, "sentiment")
+	language := firstNonEmptyMeta(meta, "language", "lang", "locale")
+	if language == "" {
+		language = "unknown"
+	}
+	complexity := firstNonEmptyMeta(meta, "complexity_level", "reading_level")
+	fileName := deriveFileName(candidate.URL, meta)
+	chunkID := storage.GeneratePointID(candidate.ContentHash, candidate.URL)
+	documentID := strings.TrimSpace(candidate.ContentHash)
+	if documentID == "" {
+		documentID = candidate.URL
+	}
+	provider := strings.TrimSpace(cfg.Provider)
+	if provider == "" {
+		provider = "default"
+	}
+	model := strings.TrimSpace(cfg.EmbeddingModel)
+	chunkSize := utf8.RuneCountInString(chunkText)
+	if chunkSize == 0 {
+		chunkSize = len(chunkText)
+	}
+	return storage.VectorChunkRecord{
+		UserID:             userID,
+		CollectionName:     collectionName,
+		FileName:           fileName,
+		ChunkID:            chunkID,
+		ChunkText:          chunkText,
+		ChunkIndex:         1,
+		TotalChunks:        1,
+		ChunkSize:          chunkSize,
+		Summary:            summary,
+		Keywords:           keywords,
+		Topics:             topics,
+		Entities:           entities,
+		Sentiment:          sentiment,
+		DocumentID:         documentID,
+		DocumentType:       crawlerDocumentType,
+		Language:           language,
+		ComplexityLevel:    complexity,
+		MainConcepts:       concepts,
+		EmbeddingProvider:  provider,
+		EmbeddingModelName: model,
+		EmbeddingDimension: cfg.Dimension,
+	}
+}
+
+func deriveFileName(rawURL string, meta map[string]string) string {
+	if title := strings.TrimSpace(meta["title"]); title != "" {
+		return title
+	}
+	if u, err := url.Parse(rawURL); err == nil {
+		host := strings.TrimSpace(u.Host)
+		if host != "" {
+			return host
+		}
+		path := strings.Trim(u.Path, "/")
+		if path != "" {
+			return path
+		}
+	}
+	return rawURL
+}
+
+func firstNonEmptyMeta(meta map[string]string, keys ...string) string {
+	for _, key := range keys {
+		if meta == nil {
+			continue
+		}
+		if value := strings.TrimSpace(meta[key]); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func splitMetadataList(meta map[string]string, keys ...string) []string {
+	raw := firstNonEmptyMeta(meta, keys...)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			result = append(result, trimmed)
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
 }

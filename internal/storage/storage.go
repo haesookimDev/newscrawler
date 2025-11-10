@@ -22,26 +22,27 @@ import (
 
 // Document captures the essential information extracted from a crawl result.
 type Document struct {
-	URL           string
-	FinalURL      string
-	Depth         int
-	RetrievedAt   time.Time
-	StatusCode    int
-	HTML          []byte
-	CleanHTML     []byte
-	ExtractedText string
-	Markdown      string
-	Metadata      map[string]string
-	ScraperID     string
-	RunID         string
-	TenantID      string
-	SeedLabel     string
-	SessionID     string
-	ContentHash   string
-	NeedsIndex    bool
-	IndexedAt     *time.Time
-	UserID        string
-	UserName      string
+	URL                  string
+	FinalURL             string
+	Depth                int
+	RetrievedAt          time.Time
+	StatusCode           int
+	HTML                 []byte
+	CleanHTML            []byte
+	ExtractedText        string
+	Markdown             string
+	Metadata             map[string]string
+	ScraperID            string
+	RunID                string
+	TenantID             string
+	SeedLabel            string
+	SessionID            string
+	ContentHash          string
+	NeedsIndex           bool
+	IndexedAt            *time.Time
+	DocumentIntegratedAt *time.Time
+	UserID               string
+	UserName             string
 }
 
 // ImageRecord tracks stored image metadata for persistence.
@@ -479,23 +480,25 @@ func (s *SQLWriter) upsertPage(ctx context.Context, doc Document) error {
 	}
 
 	query := `
-        INSERT INTO pages (
-            url, final_url, depth, retrieved_at, status_code,
-            raw_html, clean_html, extracted_text, markdown,
-            metadata, scraper_id, run_id, tenant_id, seed_label,
-            session_id, content_hash, needs_index, indexed_at
-        )
-        VALUES (
-            $1,$2,$3,$4,$5,
-            $6,$7,$8,$9,
-            $10,$11,$12,$13,$14,
-            $15,$16,$17,$18
-        )
-        ON CONFLICT (session_id, url) DO UPDATE SET
-            final_url = EXCLUDED.final_url,
-            depth = EXCLUDED.depth,
-            retrieved_at = EXCLUDED.retrieved_at,
-            status_code = EXCLUDED.status_code,
+	        INSERT INTO pages (
+	            url, final_url, depth, retrieved_at, status_code,
+	            raw_html, clean_html, extracted_text, markdown,
+	            metadata, scraper_id, run_id, tenant_id, seed_label,
+	            session_id, content_hash, needs_index, indexed_at,
+	            document_integrated_at
+	        )
+	        VALUES (
+	            $1,$2,$3,$4,$5,
+	            $6,$7,$8,$9,
+	            $10,$11,$12,$13,$14,
+	            $15,$16,$17,$18,
+	            $19
+	        )
+	        ON CONFLICT (session_id, url) DO UPDATE SET
+	            final_url = EXCLUDED.final_url,
+	            depth = EXCLUDED.depth,
+	            retrieved_at = EXCLUDED.retrieved_at,
+	            status_code = EXCLUDED.status_code,
             raw_html = EXCLUDED.raw_html,
             clean_html = EXCLUDED.clean_html,
             extracted_text = EXCLUDED.extracted_text,
@@ -507,15 +510,19 @@ func (s *SQLWriter) upsertPage(ctx context.Context, doc Document) error {
             seed_label = EXCLUDED.seed_label,
             session_id = EXCLUDED.session_id,
             content_hash = EXCLUDED.content_hash,
-            needs_index = CASE
-                WHEN pages.content_hash IS DISTINCT FROM EXCLUDED.content_hash THEN TRUE
-                ELSE pages.needs_index
-            END,
-            indexed_at = CASE
-                WHEN pages.content_hash IS DISTINCT FROM EXCLUDED.content_hash THEN NULL
-                ELSE pages.indexed_at
-            END
-    `
+	            needs_index = CASE
+	                WHEN pages.content_hash IS DISTINCT FROM EXCLUDED.content_hash THEN TRUE
+	                ELSE pages.needs_index
+	            END,
+	            indexed_at = CASE
+	                WHEN pages.content_hash IS DISTINCT FROM EXCLUDED.content_hash THEN NULL
+	                ELSE pages.indexed_at
+	            END,
+	            document_integrated_at = CASE
+	                WHEN pages.content_hash IS DISTINCT FROM EXCLUDED.content_hash THEN NULL
+	                ELSE pages.document_integrated_at
+	            END
+	`
 	if _, err := s.db.ExecContext(ctx, query,
 		doc.URL,
 		doc.FinalURL,
@@ -535,6 +542,7 @@ func (s *SQLWriter) upsertPage(ctx context.Context, doc Document) error {
 		nullIfEmpty(doc.ContentHash),
 		doc.NeedsIndex,
 		timeOrNil(doc.IndexedAt),
+		timeOrNil(doc.DocumentIntegratedAt),
 	); err != nil {
 		return err
 	}
@@ -665,6 +673,7 @@ func (s *SQLWriter) ensureSchema(ctx context.Context) error {
 		`ALTER TABLE pages ADD COLUMN IF NOT EXISTS content_hash TEXT`,
 		`ALTER TABLE pages ADD COLUMN IF NOT EXISTS needs_index BOOLEAN DEFAULT TRUE`,
 		`ALTER TABLE pages ADD COLUMN IF NOT EXISTS indexed_at TIMESTAMPTZ`,
+		`ALTER TABLE pages ADD COLUMN IF NOT EXISTS document_integrated_at TIMESTAMPTZ`,
 		`UPDATE pages SET session_id = url WHERE (session_id IS NULL OR session_id = '')`,
 		`ALTER TABLE pages ALTER COLUMN session_id SET NOT NULL`,
 		`ALTER TABLE IF EXISTS images DROP CONSTRAINT IF EXISTS images_page_url_fkey`,

@@ -124,6 +124,14 @@ Cancel an active crawl:
 curl -X POST http://localhost:9010/api/sessions/{session_id}/cancel
 ```
 
+Sync indexed pages into the chat document database (requires prior indexing and the same identity headers):
+
+```bash
+curl -X POST http://localhost:9010/api/crawler/sessions/{session_id}/documents \
+  -H 'X-User-ID: 42' \
+  -H 'X-User-Name: crawler-admin'
+```
+
 ### Notes
 
 - `media.enabled` requires a reachable relational database (configured under `db.*`). Disable it if you are running without persistence.
