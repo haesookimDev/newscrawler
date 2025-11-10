@@ -220,43 +220,34 @@ func (s *SQLWriter) UpsertVectorChunk(ctx context.Context, record VectorChunkRec
 	if s == nil || s.db == nil {
 		return fmt.Errorf("sql store not initialised")
 	}
-	query := `
-        INSERT INTO vector_db_chunk_meta (
-            user_id, collection_name, file_name, chunk_id, chunk_text,
-            chunk_index, total_chunks, chunk_size, summary,
-            keywords, topics, entities, sentiment,
-            document_id, document_type, language, complexity_level,
-            main_concepts, embedding_provider, embedding_model_name, embedding_dimension
-        ) VALUES (
-            $1,$2,$3,$4,$5,
-            $6,$7,$8,$9,
-            $10,$11,$12,$13,
-            $14,$15,$16,$17,
-            $18,$19,$20,$21
-        )
-        ON CONFLICT (chunk_id) DO UPDATE SET
-            chunk_text = EXCLUDED.chunk_text,
-            chunk_index = EXCLUDED.chunk_index,
-            total_chunks = EXCLUDED.total_chunks,
-            chunk_size = EXCLUDED.chunk_size,
-            summary = EXCLUDED.summary,
-            keywords = EXCLUDED.keywords,
-            topics = EXCLUDED.topics,
-            entities = EXCLUDED.entities,
-            sentiment = EXCLUDED.sentiment,
-            document_id = EXCLUDED.document_id,
-            document_type = EXCLUDED.document_type,
-            language = EXCLUDED.language,
-            complexity_level = EXCLUDED.complexity_level,
-            main_concepts = EXCLUDED.main_concepts,
-            embedding_provider = EXCLUDED.embedding_provider,
-            embedding_model_name = EXCLUDED.embedding_model_name,
-            embedding_dimension = EXCLUDED.embedding_dimension`
-	_, err := s.db.ExecContext(ctx, query,
-		nullableInt64(record.UserID),
-		strings.TrimSpace(record.CollectionName),
-		record.FileName,
-		record.ChunkID,
+	chunkID := strings.TrimSpace(record.ChunkID)
+	if chunkID == "" {
+		return fmt.Errorf("chunk_id is required")
+	}
+	collectionName := strings.TrimSpace(record.CollectionName)
+	updateQuery := `
+        UPDATE vector_db_chunk_meta
+           SET chunk_text = $1,
+               chunk_index = $2,
+               total_chunks = $3,
+               chunk_size = $4,
+               summary = $5,
+               keywords = $6,
+               topics = $7,
+               entities = $8,
+               sentiment = $9,
+               document_id = $10,
+               document_type = $11,
+               language = $12,
+               complexity_level = $13,
+               main_concepts = $14,
+               embedding_provider = $15,
+               embedding_model_name = $16,
+               embedding_dimension = $17,
+               file_name = $18,
+               collection_name = $19
+         WHERE chunk_id = $20`
+	updateArgs := []any{
 		record.ChunkText,
 		record.ChunkIndex,
 		record.TotalChunks,
@@ -274,9 +265,57 @@ func (s *SQLWriter) UpsertVectorChunk(ctx context.Context, record VectorChunkRec
 		record.EmbeddingProvider,
 		record.EmbeddingModelName,
 		record.EmbeddingDimension,
-	)
+		record.FileName,
+		collectionName,
+		chunkID,
+	}
+	res, err := s.db.ExecContext(ctx, updateQuery, updateArgs...)
 	if err != nil {
-		return fmt.Errorf("upsert vector chunk: %w", err)
+		return fmt.Errorf("update vector chunk: %w", err)
+	}
+	if rows, _ := res.RowsAffected(); rows > 0 {
+		return nil
+	}
+
+	insertQuery := `
+        INSERT INTO vector_db_chunk_meta (
+            user_id, collection_name, file_name, chunk_id, chunk_text,
+            chunk_index, total_chunks, chunk_size, summary,
+            keywords, topics, entities, sentiment,
+            document_id, document_type, language, complexity_level,
+            main_concepts, embedding_provider, embedding_model_name, embedding_dimension
+        ) VALUES (
+            $1,$2,$3,$4,$5,
+            $6,$7,$8,$9,
+            $10,$11,$12,$13,
+            $14,$15,$16,$17,
+            $18,$19,$20,$21
+        )`
+	insertArgs := []any{
+		nullableInt64(record.UserID),
+		collectionName,
+		record.FileName,
+		chunkID,
+		record.ChunkText,
+		record.ChunkIndex,
+		record.TotalChunks,
+		record.ChunkSize,
+		record.Summary,
+		pq.Array(record.Keywords),
+		pq.Array(record.Topics),
+		pq.Array(record.Entities),
+		record.Sentiment,
+		record.DocumentID,
+		record.DocumentType,
+		record.Language,
+		record.ComplexityLevel,
+		pq.Array(record.MainConcepts),
+		record.EmbeddingProvider,
+		record.EmbeddingModelName,
+		record.EmbeddingDimension,
+	}
+	if _, err := s.db.ExecContext(ctx, insertQuery, insertArgs...); err != nil {
+		return fmt.Errorf("insert vector chunk: %w", err)
 	}
 	return nil
 }
