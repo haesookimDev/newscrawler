@@ -36,7 +36,7 @@ Each module is documented inline. Extend the configuration to suit deployment en
 ### Environment Overrides
 
 - Set `XGEN_DB_DRIVER` and `XGEN_DB_DSN` to override the database connection supplied in YAML.
-- Set `XGEN_DOC_DB_DRIVER` / `XGEN_DOC_DB_DSN` when the downstream document/vector database (used for `/documents` sync) lives in a separate Postgres instance.
+- Set `XGEN_DOC_DB_DRIVER` / `XGEN_DOC_DB_DSN` to point at the external document/vector database (used exclusively by `/documents` sync). This DSN is required and must differ from the crawler database in multi-tenant deployments.
 - Set `XGEN_VECTOR_*` variables (`PROVIDER`, `ENDPOINT`, `API_KEY`, `INDEX`, `NAMESPACE`, `DIMENSION`, `EMBEDDING_MODEL`, `UPSERT_BATCH_SIZE`) to replace vector DB settings at runtime.
 - Set `XGEN_EMBEDDING_BASE_URL` to point at the embedding microservice (defaults to `http://embedding-service:8000`).
 - Set `REDIS_HOST`, `REDIS_PORT`, `REDIS_DB`, `REDIS_PASSWORD` to enable Redis-backed session persistence (optional; when unset, in-memory session tracking is used).
@@ -132,6 +132,7 @@ curl -X POST http://localhost:9010/api/crawler/sessions/{session_id}/documents \
   -H 'X-User-ID: 42' \
   -H 'X-User-Name: crawler-admin'
 ```
+> This endpoint always writes to the `document_db` connection (or `XGEN_DOC_DB_*` env overrides); ensure it targets the legacy plateerag database before issuing the request.
 
 ### Notes
 

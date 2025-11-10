@@ -56,31 +56,22 @@ func main() {
 	}
 	defer pageStore.Close()
 
-	var (
-		docStore  storage.DocumentSyncStore
-		docCloser func()
-	)
 	trimmedDocDSN := strings.TrimSpace(baseCfg.DocumentDB.DSN)
-	if trimmedDocDSN != "" {
-		docCfg := baseCfg.DocumentDB
-		if strings.TrimSpace(docCfg.Driver) == "" {
-			docCfg.Driver = baseCfg.DB.Driver
-		}
-		docWriter, err := storage.NewSQLWriter(docCfg)
-		if err != nil {
-			logger.Error("initialise document store failed", "error", err)
-			log.Fatalf("failed to initialise document store: %v", err)
-		}
-		docStore = docWriter
-		docCloser = func() {
-			_ = docWriter.Close()
-		}
-	} else {
-		docStore = pageStore
+	if trimmedDocDSN == "" {
+		logger.Error("document_db.dsn is required and must point to the external document database")
+		log.Fatalf("document database configuration missing")
 	}
-	if docCloser != nil {
-		defer docCloser()
+	docCfg := baseCfg.DocumentDB
+	if strings.TrimSpace(docCfg.Driver) == "" {
+		docCfg.Driver = baseCfg.DB.Driver
 	}
+	docWriter, err := storage.NewSQLWriter(docCfg)
+	if err != nil {
+		logger.Error("initialise document store failed", "error", err)
+		log.Fatalf("failed to initialise document store: %v", err)
+	}
+	defer docWriter.Close()
+	docStore := storage.DocumentSyncStore(docWriter)
 
 	server := api.NewServer(manager, pageStore, docStore, logger)
 

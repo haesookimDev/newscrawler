@@ -64,11 +64,6 @@ func NewServer(manager *SessionManager, store PageStore, docStore storage.Docume
 	if logger == nil {
 		logger = slog.Default()
 	}
-	if docStore == nil {
-		if ds, ok := store.(storage.DocumentSyncStore); ok {
-			docStore = ds
-		}
-	}
 	s := &Server{
 		manager:   manager,
 		pageStore: store,
