@@ -664,6 +664,7 @@ func (s *SQLWriter) ensureSchema(ctx context.Context) error {
 		`ALTER TABLE IF EXISTS images DROP CONSTRAINT IF EXISTS images_page_url_fkey`,
 		`ALTER TABLE IF EXISTS images DROP CONSTRAINT IF EXISTS images_page_fk`,
 		`ALTER TABLE pages DROP CONSTRAINT IF EXISTS pages_pkey`,
+		`ALTER TABLE pages DROP CONSTRAINT IF EXISTS pages_session_url_pkey`,
 		`ALTER TABLE pages ADD CONSTRAINT pages_session_url_pkey PRIMARY KEY (session_id, url)`,
 		`CREATE INDEX IF NOT EXISTS idx_pages_session ON pages (session_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_pages_scraper_run ON pages (scraper_id, run_id)`,
