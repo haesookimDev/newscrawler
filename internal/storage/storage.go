@@ -687,6 +687,7 @@ func (s *SQLWriter) ensureSchema(ctx context.Context) error {
 		`UPDATE images SET session_id = p.session_id FROM pages p WHERE (images.session_id IS NULL OR images.session_id = '') AND p.url = images.page_url`,
 		`ALTER TABLE images ALTER COLUMN session_id SET NOT NULL`,
 		`ALTER TABLE images DROP CONSTRAINT IF EXISTS images_pkey`,
+		`ALTER TABLE images DROP CONSTRAINT IF EXISTS images_session_page_source_pkey`,
 		`ALTER TABLE images ADD CONSTRAINT images_session_page_source_pkey PRIMARY KEY (session_id, page_url, source_url)`,
 		`ALTER TABLE images ADD CONSTRAINT images_page_fk FOREIGN KEY (session_id, page_url) REFERENCES pages(session_id, url) ON DELETE CASCADE`,
 		`DROP INDEX IF EXISTS idx_images_page_url`,
