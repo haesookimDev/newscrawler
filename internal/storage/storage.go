@@ -20,6 +20,8 @@ import (
 	"xgen-crawler/pkg/types"
 )
 
+var ErrChunkNotFound = errors.New("chunk not found")
+
 // Document captures the essential information extracted from a crawl result.
 type Document struct {
 	URL                  string
@@ -92,6 +94,8 @@ type RelationalStore interface {
 // ChunkStore persists chunk metadata for indexing.
 type ChunkStore interface {
 	SaveChunk(ctx context.Context, chunk ChunkRecord) error
+	GetChunk(ctx context.Context, sessionID, chunkID string) (ChunkRecord, error)
+	MarkChunkIndexed(ctx context.Context, sessionID, chunkID string) error
 }
 
 // VectorStore persists embeddings into a vector database.
@@ -113,11 +117,17 @@ type Pipeline struct {
 	chunks     ChunkStore
 
 	logger      *slog.Logger
-	vectorQueue chan Document
+	vectorQueue chan chunkTask
 	vectorWG    sync.WaitGroup
 	closeOnce   sync.Once
 }
 
+type chunkTask struct {
+	SessionID string
+	ChunkID   string
+	UserID    string
+	UserName  string
+}
 const (
 	defaultVectorQueueSize   = 128
 	defaultVectorWorkerCount = 4
@@ -141,8 +151,12 @@ func NewPipeline(rel RelationalStore, vec VectorStore, media MediaStore, logger 
 	if chunkStore, ok := rel.(ChunkStore); ok {
 		p.chunks = chunkStore
 	}
-	if vec != nil {
+	if vec != nil && p.chunks != nil {
+		p.vector = vec
 		p.startVectorWorkers(defaultVectorWorkerCount, defaultVectorQueueSize)
+	} else if vec != nil && logger != nil {
+		logger.Warn("vector store configured but chunk store unavailable; immediate indexing disabled")
+		p.vector = nil
 	}
 	return p
 }
@@ -199,7 +213,7 @@ func (p *Pipeline) Persist(ctx context.Context, result types.CrawlResult) error 
 	} else {
 		doc.ContentHash = computeContentFingerprint(doc.HTML, "", "")
 	}
-	doc.NeedsIndex = indexable && p.vector == nil
+	doc.NeedsIndex = indexable && (p.vector == nil)
 
 	if p.relational != nil {
 		storeDoc := doc
@@ -207,8 +221,9 @@ func (p *Pipeline) Persist(ctx context.Context, result types.CrawlResult) error 
 			return fmt.Errorf("relational store: %w", err)
 		}
 	}
-	if p.chunks != nil && doc.NeedsIndex {
-		chunk := buildChunkRecord(doc)
+	var chunk ChunkRecord
+	if p.chunks != nil && doc.SessionID != "" && indexable {
+		chunk = buildChunkRecord(doc)
 		if err := p.chunks.SaveChunk(ctx, chunk); err != nil && p.logger != nil {
 			p.logger.Error("save chunk failed",
 				"session_id", doc.SessionID,
@@ -261,12 +276,8 @@ func (p *Pipeline) Persist(ctx context.Context, result types.CrawlResult) error 
 			}
 		}
 	}
-	if p.vector != nil {
-		if indexable {
-			vectorDoc := doc
-			vectorDoc.NeedsIndex = true
-			p.enqueueVectorTask(vectorDoc)
-		}
+	if p.vector != nil && p.chunks != nil && indexable && chunk.ChunkID != "" {
+		p.enqueueChunkTask(chunk, doc.UserID, doc.UserName)
 	}
 	return nil
 }
@@ -292,7 +303,7 @@ func (p *Pipeline) startVectorWorkers(workers, queueSize int) {
 	if queueSize <= 0 {
 		queueSize = defaultVectorQueueSize
 	}
-	p.vectorQueue = make(chan Document, queueSize)
+	p.vectorQueue = make(chan chunkTask, queueSize)
 	for i := 0; i < workers; i++ {
 		p.vectorWG.Add(1)
 		go p.runVectorWorker(i + 1)
@@ -302,7 +313,22 @@ func (p *Pipeline) startVectorWorkers(workers, queueSize int) {
 func (p *Pipeline) runVectorWorker(workerID int) {
 	defer p.vectorWG.Done()
 	ctx := context.Background()
-	for doc := range p.vectorQueue {
+	for task := range p.vectorQueue {
+		chunk, err := p.chunks.GetChunk(ctx, task.SessionID, task.ChunkID)
+		if err != nil {
+			if p.logger != nil {
+				p.logger.Error("chunk fetch failed for vector upsert",
+					"worker", workerID,
+					"session_id", task.SessionID,
+					"chunk_id", task.ChunkID,
+					"error", err)
+			}
+			continue
+		}
+		doc := chunkRecordToDocument(chunk, task.UserID, task.UserName)
+		if strings.TrimSpace(doc.Markdown) == "" {
+			continue
+		}
 		if err := p.vector.UpsertEmbedding(ctx, doc); err != nil {
 			if p.logger != nil {
 				p.logger.Error("vector upsert failed",
@@ -312,6 +338,14 @@ func (p *Pipeline) runVectorWorker(workerID int) {
 					"error", err)
 			}
 			p.markIndexFailure(ctx, doc)
+			continue
+		}
+		if err := p.chunks.MarkChunkIndexed(ctx, task.SessionID, task.ChunkID); err != nil && p.logger != nil {
+			p.logger.Warn("mark chunk indexed failed after vector upsert",
+				"worker", workerID,
+				"session_id", task.SessionID,
+				"chunk_id", task.ChunkID,
+				"error", err)
 		}
 	}
 }
@@ -331,34 +365,24 @@ func (p *Pipeline) markIndexFailure(ctx context.Context, doc Document) {
 	}
 }
 
-func (p *Pipeline) enqueueVectorTask(doc Document) {
+func (p *Pipeline) enqueueChunkTask(chunk ChunkRecord, userID, userName string) {
 	if p.vectorQueue == nil {
 		return
 	}
-	task := compactVectorDocument(doc)
+	task := chunkTask{
+		SessionID: chunk.SessionID,
+		ChunkID:   chunk.ChunkID,
+		UserID:    strings.TrimSpace(userID),
+		UserName:  strings.TrimSpace(userName),
+	}
 	select {
 	case p.vectorQueue <- task:
 	default:
 		if p.logger != nil {
 			p.logger.Warn("vector queue full; dropping document",
-				"session_id", doc.SessionID,
-				"url", doc.URL)
+				"session_id", chunk.SessionID,
+				"chunk_id", chunk.ChunkID)
 		}
-	}
-}
-
-func compactVectorDocument(doc Document) Document {
-	return Document{
-		URL:           doc.URL,
-		FinalURL:      doc.FinalURL,
-		ExtractedText: doc.ExtractedText,
-		Markdown:      doc.Markdown,
-		Metadata:      doc.Metadata,
-		SessionID:     doc.SessionID,
-		ContentHash:   doc.ContentHash,
-		NeedsIndex:    doc.NeedsIndex,
-		UserID:        doc.UserID,
-		UserName:      doc.UserName,
 	}
 }
 
@@ -375,8 +399,22 @@ func buildChunkRecord(doc Document) ChunkRecord {
 		ChunkText:   text,
 		Metadata:    doc.Metadata,
 		ContentHash: doc.ContentHash,
-		NeedsIndex:  doc.NeedsIndex,
-		IndexedAt:   doc.IndexedAt,
+		NeedsIndex:  true,
+		IndexedAt:   nil,
+	}
+}
+
+func chunkRecordToDocument(chunk ChunkRecord, userID, userName string) Document {
+	return Document{
+		URL:         chunk.URL,
+		FinalURL:    chunk.URL,
+		Markdown:    chunk.ChunkText,
+		Metadata:    chunk.Metadata,
+		SessionID:   chunk.SessionID,
+		ContentHash: chunk.ContentHash,
+		NeedsIndex:  true,
+		UserID:      userID,
+		UserName:    userName,
 	}
 }
 
@@ -488,11 +526,11 @@ func (s *SQLWriter) SaveChunk(ctx context.Context, chunk ChunkRecord) error {
             content_hash = EXCLUDED.content_hash,
             needs_index = CASE
                 WHEN page_chunks.content_hash IS DISTINCT FROM EXCLUDED.content_hash THEN TRUE
-                ELSE EXCLUDED.needs_index
+                ELSE page_chunks.needs_index
             END,
             indexed_at = CASE
                 WHEN page_chunks.content_hash IS DISTINCT FROM EXCLUDED.content_hash THEN NULL
-                ELSE EXCLUDED.indexed_at
+                ELSE page_chunks.indexed_at
             END,
             updated_at = NOW()`
 	if _, err := s.db.ExecContext(ctx, query,

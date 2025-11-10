@@ -729,6 +729,47 @@ func (s *SQLWriter) MarkChunkIndexed(ctx context.Context, sessionID, chunkID str
 	return nil
 }
 
+// GetChunk retrieves a chunk record by ID.
+func (s *SQLWriter) GetChunk(ctx context.Context, sessionID, chunkID string) (ChunkRecord, error) {
+	if s == nil || s.db == nil {
+		return ChunkRecord{}, fmt.Errorf("sql store not initialised")
+	}
+	var (
+		url          sql.NullString
+		chunkText    sql.NullString
+		metadataJSON []byte
+		contentHash  sql.NullString
+		needsIndex   bool
+		indexedAt    sql.NullTime
+	)
+	err := s.db.QueryRowContext(ctx, `
+        SELECT url, chunk_text, metadata, content_hash, needs_index, indexed_at
+          FROM page_chunks
+         WHERE session_id = $1 AND chunk_id = $2`,
+		sessionID, chunkID).Scan(&url, &chunkText, &metadataJSON, &contentHash, &needsIndex, &indexedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ChunkRecord{}, ErrChunkNotFound
+		}
+		return ChunkRecord{}, fmt.Errorf("get chunk: %w", err)
+	}
+	var indexedPtr *time.Time
+	if indexedAt.Valid {
+		t := indexedAt.Time
+		indexedPtr = &t
+	}
+	return ChunkRecord{
+		SessionID:   sessionID,
+		URL:         url.String,
+		ChunkID:     chunkID,
+		ChunkText:   chunkText.String,
+		Metadata:    parseMetadata(metadataJSON),
+		ContentHash: contentHash.String,
+		NeedsIndex:  needsIndex,
+		IndexedAt:   indexedPtr,
+	}, nil
+}
+
 func parseSize(value string) int64 {
 	if value == "" {
 		return 0
