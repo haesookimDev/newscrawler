@@ -20,6 +20,14 @@ import (
 	"xgen-crawler/internal/storage"
 )
 
+// TODO 크롤링할때 오류가 발생하면 크롤링이 종료되어서 기존에 대기열에 있는 페이지는 크롤링이 진행이 안되는 문제 해결필요
+// TODO 인덱싱 도중 오류가 발생하면 중단되는데 이경우도 기존 대기열에 있는 페이지들은 인덱싱이 진행이 안되는 문제 해결필요
+
+// TODO 크롤링 과정에서 인덱싱도 하는 옵션이 있을때 임베딩에 병목이 생기면 크롤링 과정에도 문제가 발생하면 안되므로 별도의 워커로 인덱싱을 처리하도록 개선 필요
+// TODO 크롤링하면서 인덱싱할때 need_index는 false로 표시해야하고 문제가 발생해서 인덱싱이 안된 페이지만 인덱싱 필요 옵션 설정해야함
+
+// TODO 크롤링 세션이 너무 많아지면 메모리 사용량이 증가할 수 있으므로 더 이상 사용하지않는 오래된 세션은 redis에 저장 후 정리하는 정책 필요
+
 // Server exposes the HTTP API for managing crawler sessions.
 type PageStore interface {
 	ListPages(ctx context.Context, sessionID string, params storage.PageListParams) (storage.PageListResult, error)
@@ -720,15 +728,22 @@ func urlPathDecode(segment string) (string, error) {
 func (s *Server) resolveVectorConfig(sessionID string, override *VectorDBRequest) (config.VectorDBConfig, bool) {
 	if override != nil {
 		cfg := vectorRequestToConfig(override)
-		if strings.TrimSpace(cfg.Provider) == "" || strings.TrimSpace(cfg.Endpoint) == "" {
+		if !vectorConfigUsable(cfg) {
 			return config.VectorDBConfig{}, false
 		}
 		return cfg, true
 	}
-	if session, ok := s.manager.GetSession(sessionID); ok {
-		cfg := session.ConfigSnapshot().VectorDB
-		if strings.TrimSpace(cfg.Provider) != "" && strings.TrimSpace(cfg.Endpoint) != "" {
-			return cfg, true
+
+	if s.manager != nil {
+		if session, ok := s.manager.GetSession(sessionID); ok {
+			cfg := session.ConfigSnapshot().VectorDB
+			if vectorConfigUsable(cfg) {
+				return cfg, true
+			}
+		}
+		baseCfg := s.manager.baseConfig.VectorDB
+		if vectorConfigUsable(baseCfg) {
+			return baseCfg, true
 		}
 	}
 	return config.VectorDBConfig{}, false
@@ -749,6 +764,10 @@ func vectorRequestToConfig(req *VectorDBRequest) config.VectorDBConfig {
 		UpsertBatchSize: req.UpsertBatchSize,
 	}
 	return cfg
+}
+
+func vectorConfigUsable(cfg config.VectorDBConfig) bool {
+	return strings.TrimSpace(cfg.Provider) != "" && strings.TrimSpace(cfg.Endpoint) != ""
 }
 
 func idleIndexEvent(sessionID string, pending int64) indexEvent {

@@ -91,3 +91,20 @@ func assertRoute(t *testing.T, h http.Handler, method, path string, wantStatus i
 		t.Fatalf("%s %s: expected non-empty body", method, path)
 	}
 }
+
+func TestResolveVectorConfigFallbackToBaseConfig(t *testing.T) {
+	base := config.Default()
+	base.VectorDB.Provider = "qdrant"
+	base.VectorDB.Endpoint = "http://vector.example.com"
+
+	manager := NewSessionManager(base, 1, context.Background(), nil, nil)
+	server := NewServer(manager, nil, nil)
+
+	cfg, ok := server.resolveVectorConfig("nonexistent", nil)
+	if !ok {
+		t.Fatalf("expected fallback to base vector config")
+	}
+	if cfg.Provider != base.VectorDB.Provider || cfg.Endpoint != base.VectorDB.Endpoint {
+		t.Fatalf("unexpected vector config: %#v", cfg)
+	}
+}
