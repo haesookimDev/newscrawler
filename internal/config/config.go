@@ -304,8 +304,8 @@ func (c Config) Validate() error {
 			return fmt.Errorf("seed %s has invalid max_depth %d", c.Crawl.Seeds[i].URL, c.Crawl.Seeds[i].MaxDepth)
 		}
 	}
-	if c.Crawl.MaxDepth <= 0 {
-		return fmt.Errorf("crawl.max_depth must be > 0 (got %d)", c.Crawl.MaxDepth)
+	if c.Crawl.MaxDepth < 0 {
+		return fmt.Errorf("crawl.max_depth must be >= 0 (got %d)", c.Crawl.MaxDepth)
 	}
 	if c.Worker.Concurrency <= 0 {
 		return fmt.Errorf("worker.concurrency must be > 0 (got %d)", c.Worker.Concurrency)
