@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -212,6 +213,8 @@ func (c *Composite) Fetch(ctx context.Context, req types.CrawlRequest) (*types.P
 			return page, nil
 		}
 		// fall back to HTTP fetch on renderer errors.
+		logger := slog.With("url", req.URL.String(), "error", err)
+		logger.Warn("renderer failed, falling back to HTTP fetch")
 	}
 	if req.Render {
 		req.Render = false
