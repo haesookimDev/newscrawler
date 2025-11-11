@@ -933,6 +933,10 @@ func (s *SQLWriter) ensureSchema(ctx context.Context) error {
 		    PRIMARY KEY (session_id, chunk_id)
 		)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_page_chunks_chunk_id ON page_chunks (chunk_id)`,
+		`ALTER TABLE page_chunks ADD COLUMN IF NOT EXISTS chunk_index INT DEFAULT 1`,
+		`ALTER TABLE page_chunks ADD COLUMN IF NOT EXISTS total_chunks INT DEFAULT 1`,
+		`ALTER TABLE page_chunks ADD COLUMN IF NOT EXISTS chunk_size INT`,
+		`ALTER TABLE page_chunks ADD COLUMN IF NOT EXISTS file_size INT`,
 		`CREATE TABLE IF NOT EXISTS images (
 		    session_id TEXT NOT NULL,
 		    page_url TEXT NOT NULL,
