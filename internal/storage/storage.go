@@ -537,6 +537,7 @@ func (s *SQLWriter) SaveChunk(ctx context.Context, chunk ChunkRecord) error {
             content_hash = EXCLUDED.content_hash,
             needs_index = CASE
                 WHEN page_chunks.content_hash IS DISTINCT FROM EXCLUDED.content_hash THEN TRUE
+                WHEN EXCLUDED.needs_index THEN TRUE
                 ELSE page_chunks.needs_index
             END,
             indexed_at = CASE
@@ -662,14 +663,15 @@ func (s *SQLWriter) upsertPage(ctx context.Context, doc Document) error {
             seed_label = EXCLUDED.seed_label,
             session_id = EXCLUDED.session_id,
             content_hash = EXCLUDED.content_hash,
-	            needs_index = CASE
-	                WHEN pages.content_hash IS DISTINCT FROM EXCLUDED.content_hash THEN TRUE
-	                ELSE pages.needs_index
-	            END,
-	            indexed_at = CASE
-	                WHEN pages.content_hash IS DISTINCT FROM EXCLUDED.content_hash THEN NULL
-	                ELSE pages.indexed_at
-	            END,
+            needs_index = CASE
+                WHEN pages.content_hash IS DISTINCT FROM EXCLUDED.content_hash THEN TRUE
+                WHEN EXCLUDED.needs_index THEN TRUE
+                ELSE pages.needs_index
+            END,
+            indexed_at = CASE
+                WHEN pages.content_hash IS DISTINCT FROM EXCLUDED.content_hash THEN NULL
+                ELSE pages.indexed_at
+            END,
 	            document_integrated_at = CASE
 	                WHEN pages.content_hash IS DISTINCT FROM EXCLUDED.content_hash THEN NULL
 	                ELSE pages.document_integrated_at
