@@ -45,6 +45,19 @@ type Document struct {
 	DocumentIntegratedAt *time.Time
 	UserID               string
 	UserName             string
+	ChunkID              string
+	ChunkIndex           int
+	TotalChunks          int
+	ChunkSize            int
+	FileSize             int
+	FileName             string
+	OriginalFileName     string
+	RelativePath         string
+	FolderPath           string
+	FileType             string
+	UploadType           string
+	UploadTimestamp      time.Time
+	ProcessedAt          time.Time
 }
 
 // ChunkRecord captures chunk metadata used for indexing.
@@ -57,6 +70,11 @@ type ChunkRecord struct {
 	ContentHash string
 	NeedsIndex  bool
 	IndexedAt   *time.Time
+	ChunkIndex  int
+	TotalChunks int
+	ChunkSize   int
+	FileSize    int
+	CreatedAt   time.Time
 }
 
 // ImageRecord tracks stored image metadata for persistence.
@@ -176,25 +194,34 @@ func (p *Pipeline) Persist(ctx context.Context, result types.CrawlResult) error 
 		finalURL = result.Page.FinalURL.String()
 	}
 	doc := Document{
-		URL:           result.Request.URL.String(),
-		FinalURL:      finalURL,
-		Depth:         result.Request.Depth,
-		RetrievedAt:   result.Page.FetchedAt,
-		StatusCode:    result.Page.StatusCode,
-		HTML:          result.Page.Body,
-		Metadata:      result.Metadata,
-		ScraperID:     result.Request.ScraperID,
-		RunID:         result.Request.RunID,
-		TenantID:      result.Request.TenantID,
-		SeedLabel:     result.Request.SeedLabel,
-		SessionID:     result.Request.SessionID,
-		ContentHash:   "",
-		NeedsIndex:    false,
-		IndexedAt:     nil,
-		CleanHTML:     nil,
-		ExtractedText: "",
-		Markdown:      "",
+		URL:              result.Request.URL.String(),
+		FinalURL:         finalURL,
+		Depth:            result.Request.Depth,
+		RetrievedAt:      result.Page.FetchedAt,
+		StatusCode:       result.Page.StatusCode,
+		HTML:             result.Page.Body,
+		Metadata:         result.Metadata,
+		ScraperID:        result.Request.ScraperID,
+		RunID:            result.Request.RunID,
+		TenantID:         result.Request.TenantID,
+		SeedLabel:        result.Request.SeedLabel,
+		SessionID:        result.Request.SessionID,
+		ContentHash:      "",
+		NeedsIndex:       false,
+		IndexedAt:        nil,
+		CleanHTML:        nil,
+		ExtractedText:    "",
+		Markdown:         "",
+		ChunkIndex:       1,
+		TotalChunks:      1,
+		FileName:         finalURL,
+		OriginalFileName: finalURL,
+		RelativePath:     finalURL,
+		FileType:         "web_data",
+		UploadType:       "single",
 	}
+	doc.UploadTimestamp = time.Now().UTC()
+	doc.ProcessedAt = doc.UploadTimestamp
 
 	if v := strings.TrimSpace(result.Metadata["x_user_id"]); v != "" {
 		doc.UserID = v
@@ -403,6 +430,8 @@ func buildChunkRecord(doc Document) ChunkRecord {
 		text = strings.TrimSpace(doc.ExtractedText)
 	}
 	chunkID := GeneratePointID(doc.ContentHash, doc.URL)
+	chunkSize := len([]rune(text))
+	fileSize := len(text)
 	return ChunkRecord{
 		SessionID:   doc.SessionID,
 		URL:         doc.URL,
@@ -412,20 +441,40 @@ func buildChunkRecord(doc Document) ChunkRecord {
 		ContentHash: doc.ContentHash,
 		NeedsIndex:  true,
 		IndexedAt:   nil,
+		ChunkIndex:  doc.ChunkIndex,
+		TotalChunks: doc.TotalChunks,
+		ChunkSize:   chunkSize,
+		FileSize:    fileSize,
 	}
 }
 
 func chunkRecordToDocument(chunk ChunkRecord, userID, userName string) Document {
+	now := time.Now().UTC()
+	if chunk.CreatedAt.IsZero() {
+		chunk.CreatedAt = now
+	}
 	return Document{
-		URL:         chunk.URL,
-		FinalURL:    chunk.URL,
-		Markdown:    chunk.ChunkText,
-		Metadata:    chunk.Metadata,
-		SessionID:   chunk.SessionID,
-		ContentHash: chunk.ContentHash,
-		NeedsIndex:  true,
-		UserID:      userID,
-		UserName:    userName,
+		URL:              chunk.URL,
+		FinalURL:         chunk.URL,
+		Markdown:         chunk.ChunkText,
+		Metadata:         chunk.Metadata,
+		SessionID:        chunk.SessionID,
+		ContentHash:      chunk.ContentHash,
+		NeedsIndex:       true,
+		UserID:           userID,
+		UserName:         userName,
+		ChunkID:          chunk.ChunkID,
+		ChunkIndex:       chunk.ChunkIndex,
+		TotalChunks:      chunk.TotalChunks,
+		ChunkSize:        chunk.ChunkSize,
+		FileSize:         chunk.FileSize,
+		FileName:         chunk.URL,
+		OriginalFileName: chunk.URL,
+		RelativePath:     chunk.URL,
+		FileType:         "web_data",
+		UploadType:       "single",
+		UploadTimestamp:  chunk.CreatedAt,
+		ProcessedAt:      now,
 	}
 }
 
@@ -522,19 +571,37 @@ func (s *SQLWriter) SaveChunk(ctx context.Context, chunk ChunkRecord) error {
 		}
 		metadataJSON = string(encoded)
 	}
+	if chunk.ChunkIndex <= 0 {
+		chunk.ChunkIndex = 1
+	}
+	if chunk.TotalChunks <= 0 {
+		chunk.TotalChunks = 1
+	}
+	if chunk.ChunkSize <= 0 {
+		chunk.ChunkSize = len([]rune(chunk.ChunkText))
+	}
+	if chunk.FileSize <= 0 {
+		chunk.FileSize = len(chunk.ChunkText)
+	}
 	query := `
         INSERT INTO page_chunks (
             session_id, chunk_id, url, chunk_text, metadata,
-            content_hash, needs_index, indexed_at, updated_at
+            content_hash, chunk_index, total_chunks, chunk_size, file_size,
+            needs_index, indexed_at, updated_at
         ) VALUES (
             $1,$2,$3,$4,$5,
-            $6,$7,$8,NOW()
+            $6,$7,$8,$9,$10,
+            $11,$12,NOW()
         )
         ON CONFLICT (session_id, chunk_id) DO UPDATE SET
             url = EXCLUDED.url,
             chunk_text = EXCLUDED.chunk_text,
             metadata = EXCLUDED.metadata,
             content_hash = EXCLUDED.content_hash,
+            chunk_index = EXCLUDED.chunk_index,
+            total_chunks = EXCLUDED.total_chunks,
+            chunk_size = EXCLUDED.chunk_size,
+            file_size = EXCLUDED.file_size,
             needs_index = CASE
                 WHEN page_chunks.content_hash IS DISTINCT FROM EXCLUDED.content_hash THEN TRUE
                 WHEN EXCLUDED.needs_index THEN TRUE
@@ -552,6 +619,10 @@ func (s *SQLWriter) SaveChunk(ctx context.Context, chunk ChunkRecord) error {
 		nullIfEmpty(chunk.ChunkText),
 		metadataJSON,
 		nullIfEmpty(chunk.ContentHash),
+		nullIfZero(chunk.ChunkIndex),
+		nullIfZero(chunk.TotalChunks),
+		nullIfZero(chunk.ChunkSize),
+		nullIfZero(chunk.FileSize),
 		chunk.NeedsIndex,
 		timeOrNil(chunk.IndexedAt),
 	); err != nil {
@@ -731,6 +802,13 @@ func nullIfEmpty(value string) any {
 	return value
 }
 
+func nullIfZero(value int) any {
+	if value == 0 {
+		return nil
+	}
+	return value
+}
+
 func timeOrNil(t *time.Time) any {
 	if t == nil || t.IsZero() {
 		return nil
@@ -844,6 +922,10 @@ func (s *SQLWriter) ensureSchema(ctx context.Context) error {
 		    chunk_text TEXT,
 		    metadata JSONB,
 		    content_hash TEXT,
+		    chunk_index INT DEFAULT 1,
+		    total_chunks INT DEFAULT 1,
+		    chunk_size INT,
+		    file_size INT,
 		    needs_index BOOLEAN DEFAULT TRUE,
 		    indexed_at TIMESTAMPTZ,
 		    created_at TIMESTAMPTZ DEFAULT NOW(),

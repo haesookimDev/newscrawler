@@ -117,17 +117,81 @@ func (s *QdrantStore) UpsertEmbedding(ctx context.Context, doc Document) error {
 		return fmt.Errorf("embedding dimension mismatch: expected %d, got %d", dimension, len(embedding))
 	}
 
-	payload := map[string]any{
-		"url":            doc.URL,
-		"final_url":      doc.FinalURL,
-		"session_id":     doc.SessionID,
-		"content_hash":   doc.ContentHash,
-		"markdown":       doc.Markdown,
-		"extracted_text": doc.ExtractedText,
-		"metadata":       doc.Metadata,
+	pointID := doc.ChunkID
+	if strings.TrimSpace(pointID) == "" {
+		pointID = GeneratePointID(doc.ContentHash, doc.URL)
 	}
 
-	pointID := GeneratePointID(doc.ContentHash, doc.URL)
+	chunkText := doc.Markdown
+	chunkIndex := doc.ChunkIndex
+	if chunkIndex <= 0 {
+		chunkIndex = 1
+	}
+	totalChunks := doc.TotalChunks
+	if totalChunks <= 0 {
+		totalChunks = 1
+	}
+	chunkSize := doc.ChunkSize
+	if chunkSize <= 0 {
+		chunkSize = len([]rune(chunkText))
+	}
+	fileSize := doc.FileSize
+	if fileSize <= 0 {
+		fileSize = len(chunkText)
+	}
+	fileName := strings.TrimSpace(doc.FileName)
+	if fileName == "" {
+		fileName = doc.URL
+	}
+	originalFileName := strings.TrimSpace(doc.OriginalFileName)
+	if originalFileName == "" {
+		originalFileName = fileName
+	}
+	relativePath := strings.TrimSpace(doc.RelativePath)
+	if relativePath == "" {
+		relativePath = doc.URL
+	}
+	uploadType := strings.TrimSpace(doc.UploadType)
+	if uploadType == "" {
+		uploadType = "single"
+	}
+	fileType := strings.TrimSpace(doc.FileType)
+	if fileType == "" {
+		fileType = "web_data"
+	}
+	processedAt := doc.ProcessedAt
+	if processedAt.IsZero() {
+		processedAt = time.Now().UTC()
+	}
+	uploadTimestamp := doc.UploadTimestamp
+	if uploadTimestamp.IsZero() {
+		uploadTimestamp = processedAt
+	}
+
+	payload := map[string]any{
+		"document_id":        pointID,
+		"chunk_id":           pointID,
+		"chunk_index":        chunkIndex,
+		"chunk_text":         chunkText,
+		"total_chunks":       totalChunks,
+		"chunk_size":         chunkSize,
+		"file_name":          fileName,
+		"file_type":          fileType,
+		"original_file_name": originalFileName,
+		"relative_path":      relativePath,
+		"folder_path":        strings.TrimSpace(doc.FolderPath),
+		"upload_type":        uploadType,
+		"upload_timestamp":   uploadTimestamp,
+		"processed_at":       processedAt,
+		"file_size":          fileSize,
+		"url":                doc.URL,
+		"final_url":          doc.FinalURL,
+		"session_id":         doc.SessionID,
+		"content_hash":       doc.ContentHash,
+		"markdown":           chunkText,
+		"extracted_text":     doc.ExtractedText,
+		"metadata":           doc.Metadata,
+	}
 
 	point := map[string]any{
 		"id":      pointID,

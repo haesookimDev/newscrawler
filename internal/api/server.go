@@ -1159,16 +1159,29 @@ func (s *Server) fetchEmbeddingConfig(ctx context.Context, userID, userName stri
 }
 
 func chunkToVectorDocument(chunk storage.ChunkIndexCandidate, userID, userName string) storage.Document {
+	now := time.Now().UTC()
 	return storage.Document{
-		URL:         chunk.URL,
-		FinalURL:    chunk.URL,
-		Markdown:    chunk.ChunkText,
-		Metadata:    chunk.Metadata,
-		SessionID:   chunk.SessionID,
-		ContentHash: chunk.ContentHash,
-		NeedsIndex:  true,
-		UserID:      userID,
-		UserName:    userName,
+		URL:              chunk.URL,
+		FinalURL:         chunk.URL,
+		Markdown:         chunk.ChunkText,
+		Metadata:         chunk.Metadata,
+		SessionID:        chunk.SessionID,
+		ContentHash:      chunk.ContentHash,
+		NeedsIndex:       true,
+		UserID:           userID,
+		UserName:         userName,
+		ChunkID:          chunk.ChunkID,
+		ChunkIndex:       chunk.ChunkIndex,
+		TotalChunks:      chunk.TotalChunks,
+		ChunkSize:        chunk.ChunkSize,
+		FileSize:         chunk.FileSize,
+		FileName:         chunk.URL,
+		OriginalFileName: chunk.URL,
+		RelativePath:     chunk.URL,
+		FileType:         "web_data",
+		UploadType:       "single",
+		UploadTimestamp:  chunk.CreatedAt,
+		ProcessedAt:      now,
 	}
 }
 

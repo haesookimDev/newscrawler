@@ -88,6 +88,11 @@ type ChunkIndexCandidate struct {
 	ChunkText   string
 	Metadata    map[string]string
 	ContentHash string
+	ChunkIndex  int
+	TotalChunks int
+	ChunkSize   int
+	FileSize    int
+	CreatedAt   time.Time
 }
 
 // PageDetail extends summary with full content.
@@ -671,7 +676,10 @@ func (s *SQLWriter) FetchChunksNeedingIndex(ctx context.Context, sessionID strin
 		limit = 32
 	}
 	rows, err := s.db.QueryContext(ctx, `
-        SELECT chunk_id, url, chunk_text, metadata, content_hash
+        SELECT chunk_id, url, chunk_text, metadata, content_hash,
+               COALESCE(chunk_index,1), COALESCE(total_chunks,1),
+               COALESCE(chunk_size,0), COALESCE(file_size,0),
+               created_at
         FROM page_chunks
         WHERE session_id = $1 AND needs_index = TRUE
         ORDER BY updated_at ASC
@@ -689,8 +697,13 @@ func (s *SQLWriter) FetchChunksNeedingIndex(ctx context.Context, sessionID strin
 			chunkText    sql.NullString
 			metadataJSON []byte
 			contentHash  sql.NullString
+			chunkIndex   sql.NullInt64
+			totalChunks  sql.NullInt64
+			chunkSize    sql.NullInt64
+			fileSize     sql.NullInt64
+			createdAt    time.Time
 		)
-		if err := rows.Scan(&chunkID, &url, &chunkText, &metadataJSON, &contentHash); err != nil {
+		if err := rows.Scan(&chunkID, &url, &chunkText, &metadataJSON, &contentHash, &chunkIndex, &totalChunks, &chunkSize, &fileSize, &createdAt); err != nil {
 			return nil, fmt.Errorf("scan chunk needing index: %w", err)
 		}
 		chunk := ChunkIndexCandidate{
@@ -700,6 +713,11 @@ func (s *SQLWriter) FetchChunksNeedingIndex(ctx context.Context, sessionID strin
 			ChunkText:   chunkText.String,
 			Metadata:    parseMetadata(metadataJSON),
 			ContentHash: contentHash.String,
+			ChunkIndex:  int(chunkIndex.Int64),
+			TotalChunks: int(totalChunks.Int64),
+			ChunkSize:   int(chunkSize.Int64),
+			FileSize:    int(fileSize.Int64),
+			CreatedAt:   createdAt,
 		}
 		chunks = append(chunks, chunk)
 	}
@@ -741,12 +759,20 @@ func (s *SQLWriter) GetChunk(ctx context.Context, sessionID, chunkID string) (Ch
 		contentHash  sql.NullString
 		needsIndex   bool
 		indexedAt    sql.NullTime
+		chunkIndex   sql.NullInt64
+		totalChunks  sql.NullInt64
+		chunkSize    sql.NullInt64
+		fileSize     sql.NullInt64
+		createdAt    time.Time
 	)
 	err := s.db.QueryRowContext(ctx, `
-        SELECT url, chunk_text, metadata, content_hash, needs_index, indexed_at
+        SELECT url, chunk_text, metadata, content_hash, needs_index, indexed_at,
+               COALESCE(chunk_index,1), COALESCE(total_chunks,1),
+               COALESCE(chunk_size,0), COALESCE(file_size,0),
+               created_at
           FROM page_chunks
          WHERE session_id = $1 AND chunk_id = $2`,
-		sessionID, chunkID).Scan(&url, &chunkText, &metadataJSON, &contentHash, &needsIndex, &indexedAt)
+		sessionID, chunkID).Scan(&url, &chunkText, &metadataJSON, &contentHash, &needsIndex, &indexedAt, &chunkIndex, &totalChunks, &chunkSize, &fileSize, &createdAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ChunkRecord{}, ErrChunkNotFound
@@ -767,6 +793,11 @@ func (s *SQLWriter) GetChunk(ctx context.Context, sessionID, chunkID string) (Ch
 		ContentHash: contentHash.String,
 		NeedsIndex:  needsIndex,
 		IndexedAt:   indexedPtr,
+		ChunkIndex:  int(chunkIndex.Int64),
+		TotalChunks: int(totalChunks.Int64),
+		ChunkSize:   int(chunkSize.Int64),
+		FileSize:    int(fileSize.Int64),
+		CreatedAt:   createdAt,
 	}, nil
 }
 
