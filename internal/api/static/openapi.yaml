@@ -425,6 +425,8 @@ components:
           $ref: '#/components/schemas/VectorDBRequest'
         discovery:
           $ref: '#/components/schemas/DiscoveryRequest'
+        rendering:
+          $ref: '#/components/schemas/RenderingRequest'
     StartIndexRequest:
       type: object
       description: >
@@ -450,6 +452,33 @@ components:
           type: integer
           minimum: 1
           description: Overrides the per-batch sync size (defaults to vector_db.upsert_batch_size or 64).
+    RenderingRequest:
+      type: object
+      description: Optional overrides for the JavaScript rendering pipeline.
+      properties:
+        enabled:
+          type: boolean
+          description: Toggle rendering on/off for this session.
+        engine:
+          type: string
+          description: Rendering engine identifier (defaults to chromedp).
+        timeout_seconds:
+          type: integer
+          minimum: 1
+          description: Max time to wait for a rendered document before falling back.
+        wait_for_selector:
+          type: string
+          description: Optional CSS selector that must be ready before exporting HTML.
+        wait_for_dom_ready:
+          type: boolean
+          description: Wait until the browser reports the DOM is fully loaded before capturing HTML.
+        concurrent_sessions:
+          type: integer
+          minimum: 1
+          description: Max parallel renderer sessions dedicated to this crawl.
+        disable_headless:
+          type: boolean
+          description: Run Chrome with a visible window (useful for debugging).
     DocumentSyncResponse:
       type: object
       properties:

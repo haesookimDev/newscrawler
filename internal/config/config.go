@@ -135,6 +135,7 @@ type RenderingConfig struct {
 	Engine             string   `yaml:"engine"`
 	Timeout            Duration `yaml:"timeout"`
 	WaitForSelector    string   `yaml:"wait_for_selector"`
+	WaitForDOMReady    bool     `yaml:"wait_for_dom_ready"`
 	ConcurrentSessions int      `yaml:"concurrent_sessions"`
 	DisableHeadless    bool     `yaml:"disable_headless"`
 }
@@ -220,6 +221,7 @@ func Default() Config {
 			Enabled:            false,
 			Engine:             "chromedp",
 			Timeout:            DurationFrom(15 * time.Second),
+			WaitForDOMReady:    false,
 			ConcurrentSessions: 2,
 		},
 		Logging: LoggingConfig{

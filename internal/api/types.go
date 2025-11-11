@@ -25,6 +25,7 @@ type CreateSessionRequest struct {
 	Media           MediaRequest      `json:"media"`
 	VectorDB        *VectorDBRequest  `json:"vector_db,omitempty"`
 	DiscoveryBoosts *DiscoveryRequest `json:"discovery,omitempty"`
+	Rendering       *RenderingRequest `json:"rendering,omitempty"`
 
 	UserID   string `json:"-"`
 	UserName string `json:"-"`
@@ -65,6 +66,17 @@ type DiscoveryRequest struct {
 	MaxLinksPerPage *int     `json:"max_links_per_page,omitempty"`
 	IncludePatterns []string `json:"include_patterns,omitempty"`
 	ExcludePatterns []string `json:"exclude_patterns,omitempty"`
+}
+
+// RenderingRequest exposes optional JS rendering controls.
+type RenderingRequest struct {
+	Enabled            *bool  `json:"enabled,omitempty"`
+	Engine             string `json:"engine,omitempty"`
+	TimeoutSeconds     int    `json:"timeout_seconds,omitempty"`
+	WaitForSelector    string `json:"wait_for_selector,omitempty"`
+	WaitForDOMReady    *bool  `json:"wait_for_dom_ready,omitempty"`
+	ConcurrentSessions *int   `json:"concurrent_sessions,omitempty"`
+	DisableHeadless    *bool  `json:"disable_headless,omitempty"`
 }
 
 // SessionStatus captures the lifecycle stage of a session.

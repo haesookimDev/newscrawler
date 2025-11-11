@@ -16,6 +16,7 @@ import (
 type RenderOptions struct {
 	Timeout            time.Duration
 	WaitForSelector    string
+	WaitForDOMReady    bool
 	UserAgent          string
 	MaxBodyBytes       int64
 	DisableHeadless    bool
@@ -87,13 +88,22 @@ func (r *ChromedpRenderer) Render(parentCtx context.Context, req types.CrawlRequ
 		chromedp.Navigate(req.URL.String()),
 	}
 
-	waitSelector := r.opts.WaitForSelector
-	if strings.TrimSpace(waitSelector) == "" {
-		waitSelector = "body"
+	if r.opts.WaitForDOMReady {
+		actions = append(actions,
+			waitForDocumentReady(),
+			chromedp.Sleep(250*time.Millisecond),
+		)
+	} else {
+		waitSelector := r.opts.WaitForSelector
+		if strings.TrimSpace(waitSelector) == "" {
+			waitSelector = "body"
+		}
+		actions = append(actions,
+			chromedp.WaitReady(waitSelector, chromedp.ByQuery),
+			chromedp.Sleep(250*time.Millisecond),
+		)
 	}
 	actions = append(actions,
-		chromedp.WaitReady(waitSelector, chromedp.ByQuery),
-		chromedp.Sleep(250*time.Millisecond),
 		chromedp.OuterHTML("html", &html, chromedp.ByQuery),
 		chromedp.Location(&finalURL),
 	)
@@ -132,4 +142,25 @@ func selectUserAgent(base string) string {
 		return base
 	}
 	return "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+}
+
+func waitForDocumentReady() chromedp.Action {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			var readyState string
+			if err := chromedp.Evaluate(`document.readyState`, &readyState).Do(ctx); err != nil {
+				return err
+			}
+			if readyState == "complete" {
+				return nil
+			}
+			select {
+			case <-ticker.C:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	})
 }

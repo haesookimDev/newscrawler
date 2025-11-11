@@ -73,6 +73,7 @@ rendering:
   enabled: true
   engine: chromedp
   timeout: 15s
+  wait_for_dom_ready: false
   wait_for_selector: ""
   concurrent_sessions: 2
   disable_headless: false

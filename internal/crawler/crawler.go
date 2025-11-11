@@ -148,6 +148,7 @@ func NewEngine(cfg config.Config, opts ...EngineOption) (*Engine, error) {
 			renderer = fetcher.NewChromedpRenderer(fetcher.RenderOptions{
 				Timeout:            cfg.Rendering.Timeout.Duration,
 				WaitForSelector:    cfg.Rendering.WaitForSelector,
+				WaitForDOMReady:    cfg.Rendering.WaitForDOMReady,
 				UserAgent:          cfg.Crawl.UserAgent,
 				MaxBodyBytes:       cfg.Crawl.MaxBodyBytes,
 				DisableHeadless:    cfg.Rendering.DisableHeadless,

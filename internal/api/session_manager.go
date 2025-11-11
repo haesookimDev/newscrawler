@@ -383,6 +383,30 @@ func (m *SessionManager) buildConfig(req CreateSessionRequest, sessionID, runID,
 		}
 	}
 
+	if req.Rendering != nil {
+		if req.Rendering.Enabled != nil {
+			cfg.Rendering.Enabled = *req.Rendering.Enabled
+		}
+		if trimmed := strings.TrimSpace(req.Rendering.Engine); trimmed != "" {
+			cfg.Rendering.Engine = trimmed
+		}
+		if req.Rendering.TimeoutSeconds > 0 {
+			cfg.Rendering.Timeout = config.DurationFrom(time.Duration(req.Rendering.TimeoutSeconds) * time.Second)
+		}
+		if selector := strings.TrimSpace(req.Rendering.WaitForSelector); selector != "" {
+			cfg.Rendering.WaitForSelector = selector
+		}
+		if req.Rendering.ConcurrentSessions != nil && *req.Rendering.ConcurrentSessions > 0 {
+			cfg.Rendering.ConcurrentSessions = *req.Rendering.ConcurrentSessions
+		}
+		if req.Rendering.DisableHeadless != nil {
+			cfg.Rendering.DisableHeadless = *req.Rendering.DisableHeadless
+		}
+		if req.Rendering.WaitForDOMReady != nil {
+			cfg.Rendering.WaitForDOMReady = *req.Rendering.WaitForDOMReady
+		}
+	}
+
 	cfg.Job.ScraperID = sessionID
 	cfg.Job.RunID = runID
 	if cfg.Job.Metadata == nil {
