@@ -21,6 +21,7 @@ type RenderOptions struct {
 	MaxBodyBytes       int64
 	DisableHeadless    bool
 	ConcurrentSessions int
+	CaptureDelay       time.Duration
 }
 
 // ChromedpRenderer executes headless Chrome sessions using chromedp.
@@ -88,20 +89,26 @@ func (r *ChromedpRenderer) Render(parentCtx context.Context, req types.CrawlRequ
 		chromedp.Navigate(req.URL.String()),
 	}
 
-	if r.opts.WaitForDOMReady {
+	switch {
+	case r.opts.WaitForDOMReady:
 		actions = append(actions,
 			waitForDocumentReady(),
 			chromedp.Sleep(250*time.Millisecond),
 		)
-	} else {
-		waitSelector := r.opts.WaitForSelector
-		if strings.TrimSpace(waitSelector) == "" {
-			waitSelector = "body"
+	default:
+		waitSelector := strings.TrimSpace(r.opts.WaitForSelector)
+		if waitSelector != "" {
+			actions = append(actions,
+				chromedp.WaitReady(waitSelector, chromedp.ByQuery),
+				chromedp.Sleep(250*time.Millisecond),
+			)
+		} else {
+			delay := r.opts.CaptureDelay
+			if delay <= 0 {
+				delay = 1500 * time.Millisecond
+			}
+			actions = append(actions, chromedp.Sleep(delay))
 		}
-		actions = append(actions,
-			chromedp.WaitReady(waitSelector, chromedp.ByQuery),
-			chromedp.Sleep(250*time.Millisecond),
-		)
 	}
 	actions = append(actions,
 		chromedp.OuterHTML("html", &html, chromedp.ByQuery),
