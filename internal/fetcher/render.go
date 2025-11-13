@@ -32,7 +32,7 @@ type ChromedpRenderer struct {
 // NewChromedpRenderer constructs a renderer with bounded concurrency.
 func NewChromedpRenderer(opts RenderOptions) *ChromedpRenderer {
 	if opts.Timeout <= 0 {
-		opts.Timeout = 15 * time.Second
+		opts.Timeout = 60 * time.Second
 	}
 	if opts.MaxBodyBytes <= 0 {
 		opts.MaxBodyBytes = 5 * 1024 * 1024
