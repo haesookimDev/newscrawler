@@ -3,6 +3,7 @@ package fetcher
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strings"
 	"time"
@@ -28,6 +29,7 @@ type RenderOptions struct {
 type ChromedpRenderer struct {
 	opts      RenderOptions
 	semaphore chan struct{}
+	logger    *slog.Logger
 }
 
 // NewChromedpRenderer constructs a renderer with bounded concurrency.
@@ -44,6 +46,7 @@ func NewChromedpRenderer(opts RenderOptions) *ChromedpRenderer {
 	return &ChromedpRenderer{
 		opts:      opts,
 		semaphore: make(chan struct{}, opts.ConcurrentSessions),
+		logger:    slog.Default(),
 	}
 }
 
@@ -52,6 +55,13 @@ func (r *ChromedpRenderer) Render(parentCtx context.Context, req types.CrawlRequ
 	if req.URL == nil {
 		return nil, fmt.Errorf("render request URL is nil")
 	}
+
+	logger := r.logger.With(
+		"url", req.URL.String(),
+		"timeout", r.opts.Timeout.String(),
+		"wait_for_dom_ready", r.opts.WaitForDOMReady,
+		"wait_for_selector", strings.TrimSpace(r.opts.WaitForSelector),
+	)
 
 	select {
 	case r.semaphore <- struct{}{}:
@@ -89,15 +99,18 @@ func (r *ChromedpRenderer) Render(parentCtx context.Context, req types.CrawlRequ
 		chromedp.Navigate(req.URL.String()),
 	}
 
+	waitMode := "capture_delay"
 	switch {
 	case r.opts.WaitForDOMReady:
+		waitMode = "dom_ready"
 		actions = append(actions,
-			waitForDocumentReady(),
+			waitForDocumentReady(logger),
 			chromedp.Sleep(250*time.Millisecond),
 		)
 	default:
 		waitSelector := strings.TrimSpace(r.opts.WaitForSelector)
 		if waitSelector != "" {
+			waitMode = "selector"
 			actions = append(actions,
 				chromedp.WaitReady(waitSelector, chromedp.ByQuery),
 				chromedp.Sleep(250*time.Millisecond),
@@ -107,15 +120,18 @@ func (r *ChromedpRenderer) Render(parentCtx context.Context, req types.CrawlRequ
 			if delay <= 0 {
 				delay = 1500 * time.Millisecond
 			}
+			waitMode = "delay"
 			actions = append(actions, chromedp.Sleep(delay))
 		}
 	}
+	logger.Debug("chromedp starting render", "wait_mode", waitMode)
 	actions = append(actions,
 		chromedp.OuterHTML("html", &html, chromedp.ByQuery),
 		chromedp.Location(&finalURL),
 	)
 
 	if err := chromedp.Run(chromeCtx, actions...); err != nil {
+		logger.Error("chromedp run failed", "error", err)
 		return nil, fmt.Errorf("chromedp run: %w", err)
 	}
 
@@ -141,6 +157,11 @@ func (r *ChromedpRenderer) Render(parentCtx context.Context, req types.CrawlRequ
 		Rendered:        true,
 		ResponseLatency: latency,
 	}
+	logger.Debug("chromedp render complete",
+		"latency_ms", latency.Milliseconds(),
+		"final_url", parsedFinal.String(),
+		"html_bytes", len(html),
+	)
 	return page, nil
 }
 
@@ -151,13 +172,16 @@ func selectUserAgent(base string) string {
 	return "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 }
 
-func waitForDocumentReady() chromedp.Action {
+func waitForDocumentReady(logger *slog.Logger) chromedp.Action {
 	return chromedp.ActionFunc(func(ctx context.Context) error {
 		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
 		for {
 			var readyState string
 			if err := chromedp.Evaluate(`document.readyState`, &readyState).Do(ctx); err != nil {
+				if logger != nil {
+					logger.Warn("waitForDocumentReady evaluate failed", "error", err)
+				}
 				return err
 			}
 			if readyState == "complete" {
@@ -166,6 +190,9 @@ func waitForDocumentReady() chromedp.Action {
 			select {
 			case <-ticker.C:
 			case <-ctx.Done():
+				if logger != nil {
+					logger.Warn("waitForDocumentReady cancelled", "error", ctx.Err())
+				}
 				return ctx.Err()
 			}
 		}
